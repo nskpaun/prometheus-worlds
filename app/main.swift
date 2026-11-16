@@ -29,6 +29,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
     func environment() -> [String: String] {
         var env = ProcessInfo.processInfo.environment
         env["PATH"] = env["PATH"] ?? "/usr/bin:/bin"
+        // Run from Xcode, the app gets Metal API validation (MTL_DEBUG_LAYER etc.). Passed on to the trainer, it aborts
+        // on msplat's 12-byte cam_pos buffer bound to a float3 (16-byte) kernel argument, which is harmless without it.
+        for k in env.keys where k.hasPrefix("MTL_") || k.hasPrefix("METAL_") { env[k] = nil }
         return env
     }
 
