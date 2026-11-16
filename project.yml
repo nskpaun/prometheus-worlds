@@ -1,0 +1,52 @@
+# Source for "Prometheus Worlds.xcodeproj". The project file is committed, so you only need this if you change the
+# project setup: brew install xcodegen && xcodegen
+name: Prometheus Worlds
+options:
+  bundleIdPrefix: local.prometheusworlds
+  deploymentTarget:
+    macOS: "14.0"
+  createIntermediateGroups: true
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    MACOSX_DEPLOYMENT_TARGET: "14.0"
+targets:
+  Prometheus Worlds:
+    type: application
+    platform: macOS
+    sources:
+      - path: app/main.swift
+    settings:
+      base:
+        PRODUCT_NAME: Prometheus Worlds
+        PRODUCT_BUNDLE_IDENTIFIER: local.prometheusworlds.app
+        PRODUCT_MODULE_NAME: PrometheusWorlds
+        EXECUTABLE_NAME: PrometheusWorlds
+        INFOPLIST_FILE: app/Info.plist
+        CODE_SIGN_IDENTITY: "-"
+        CODE_SIGN_STYLE: Manual
+        DEVELOPMENT_TEAM: ""
+        ENABLE_HARDENED_RUNTIME: NO
+        ENABLE_APP_SANDBOX: NO
+        ENABLE_USER_SCRIPT_SANDBOXING: NO
+        GENERATE_INFOPLIST_FILE: NO
+    postBuildScripts:
+      - name: Repository path and icon
+        basedOnDependencyAnalysis: false
+        script: |
+          RES="$TARGET_BUILD_DIR/$UNLOCALIZED_RESOURCES_FOLDER_PATH"; mkdir -p "$RES"
+          # the app finds setup.sh and the pipelines through this path, so it runs from this checkout
+          echo "$SRCROOT" > "$RES/root.txt"
+          ICONSET="$DERIVED_FILE_DIR/AppIcon.iconset"; rm -rf "$ICONSET"; mkdir -p "$ICONSET"
+          for s in 16 32 128 256 512; do
+            sips -z $s $s "$SRCROOT/app/icon_1024.png" --out "$ICONSET/icon_${s}x${s}.png" >/dev/null
+            sips -z $((s*2)) $((s*2)) "$SRCROOT/app/icon_1024.png" --out "$ICONSET/icon_${s}x${s}@2x.png" >/dev/null
+          done
+          iconutil -c icns "$ICONSET" -o "$RES/AppIcon.icns"
+schemes:
+  Prometheus Worlds:
+    build:
+      targets:
+        Prometheus Worlds: all
+    run:
+      config: Debug

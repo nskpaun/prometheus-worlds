@@ -31,7 +31,7 @@ This project is judged by how worlds look, so a pull request that changes what a
 - **The prompt or photos you used**, so someone else can rebuild it.
 - **Build time and peak memory**, if your change touches the pipeline.
 
-Run the unit tests before opening a pull request:
+Set up with Xcode's Run button or `./setup.sh` (see the README). Run the unit tests before opening a pull request:
 
 ```bash
 cd thread && .venv/bin/python -m unittest discover tests

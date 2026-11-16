@@ -21,3 +21,9 @@ thread-start.txt
 hour-start.txt
 # third-party code and weights fetched for experiments
 ext/
+
+# first-run setup marker
+.setup/
+.build/
+xcuserdata/
+*.xcuserstate

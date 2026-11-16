@@ -48,62 +48,39 @@ These are what make it a challenge. A change that breaks one of them will not be
 ## Requirements
 
 - An Apple Silicon Mac with 64 GB of memory. Developed on an M4 Pro.
-- macOS 14 or later, Xcode command line tools (`xcode-select --install`), and [Homebrew](https://brew.sh).
-- Tens of GB of free disk for model weights, which download on first use.
+- macOS 14 or later.
+- [Xcode](https://apps.apple.com/app/xcode/id497799835) and [Homebrew](https://brew.sh).
+- About 40 GB of free disk for tools and model weights.
 
 ## Build it
 
-From the repository root:
+1. Clone the repository.
+2. Open `Prometheus Worlds.xcodeproj` in Xcode.
+3. Press **Run**.
+
+On first launch the app sets itself up and shows its progress: Homebrew tools (uv, COLMAP, Ollama, Node), two Python environments, the viewer's packages, the layout model and the optional 3D shape model. That takes a while and needs the internet once. The image models (about 20 GB) download the first time you build a world. After that, everything runs offline.
+
+If a step fails, the window shows why. Fix it, quit, and open the app again: setup carries on from where it stopped.
+
+The app runs from your checkout, so keep the folder where it is. Your worlds are saved in `thread/worlds/`.
+
+**From the command line instead:**
 
 ```bash
-brew install uv colmap ollama libusb node
-```
-
-```bash
-ollama pull qwen3.5:9b
-```
-
-```bash
-uv venv --python 3.12 thread/.venv && uv pip install --python thread/.venv/bin/python -r thread/requirements.txt
-```
-
-```bash
-uv venv --python 3.12 spike/.venv && uv pip install --python spike/.venv/bin/python -r spike/requirements.txt
-```
-
-```bash
-npm install --prefix thread/viewer
-```
-
-Optional, for real object shapes in invented rooms (without it objects are painted boxes):
-
-```bash
-git clone https://github.com/ZimengXiong/Hunyuan3D-Swift ext/Hunyuan3D-Swift && (cd ext/Hunyuan3D-Swift && swift build -c release && hf download zimengxiong/hunyuan3d-mlx-shape-small --local-dir weights/shape-small)
-```
-
-`swift build` does not produce MLX's Metal shader library unless full Xcode is installed. Without Xcode, take it from the matching Python package (the version must match the `mlx-swift` the port pins, 0.31.1 here):
-
-```bash
-uv pip install --target /tmp/mlx0311 mlx==0.31.1 && cp /tmp/mlx0311/mlx/lib/mlx.metallib ext/Hunyuan3D-Swift/.build/release/
+./setup.sh
 ```
 
 ```bash
 app/build.sh
 ```
 
-That produces `app/Prometheus Worlds.app`. Drag it to the Desktop or Applications and open it.
-
-The app is a thin window around this folder: it starts `thread/server.py` and shows the page. It stores the folder's path when built, so rebuild it if the folder moves. It is signed ad hoc, for this Mac only.
-
-To run without the app:
+`setup.sh` is safe to run again; `./setup.sh --no-shapes` skips the 3D shape model. `app/build.sh` builds `app/Prometheus Worlds.app` with Xcode's tools. To run without the app at all:
 
 ```bash
 thread/.venv/bin/python thread/server.py 8765
 ```
 
 Then open `http://127.0.0.1:8765/viewer/index.html`.
-
-To redraw the icon, run `thread/.venv/bin/python make_icon.py` inside `app/`, then rebuild.
 
 ## Using it
 
@@ -132,7 +109,9 @@ In short: a sentence becomes a blockout of boxes and generated shapes, an image 
 
 | Path | What |
 |---|---|
-| `app/` | The macOS app: `main.swift`, `build.sh`, `make_icon.py` |
+| `Prometheus Worlds.xcodeproj` | Open this and press Run (generated from `project.yml` by XcodeGen) |
+| `setup.sh` | First-run setup: tools, Python environments, models |
+| `app/` | The macOS app: `main.swift`, `Info.plist`, `build.sh`, `make_icon.py` |
 | `thread/server.py` | Local server: static files plus the job API |
 | `thread/pipeline.py` | The two pipelines |
 | `thread/llm_boxes.py` | Layout sentence to blockout |
