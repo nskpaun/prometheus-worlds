@@ -58,7 +58,7 @@ These are what make it a challenge. A change that breaks one of them will not be
 2. Open `Prometheus Worlds.xcodeproj` in Xcode.
 3. Press **Run**.
 
-On first launch the app sets itself up and shows its progress: Homebrew tools (uv, COLMAP, Ollama, Node), two Python environments, the viewer's packages, the layout model and the optional 3D shape model. That takes a while and needs the internet once. The image models (about 20 GB) download the first time you build a world. After that, everything runs offline.
+On first launch the app sets itself up and shows its progress: Homebrew tools (uv, COLMAP, Ollama), two Python environments, the layout model and the optional 3D shape model. That takes a while and needs the internet once. The image models (about 20 GB) download the first time you build a world. After that, everything runs offline.
 
 If a step fails, the window shows why. Fix it, quit, and open the app again: setup carries on from where it stopped.
 
@@ -103,7 +103,7 @@ COLMAP, msplat, Open3D, three.js, Spark and Rapier do the rest. Each model has i
 
 [docs/how-it-works.md](docs/how-it-works.md) has the detail: both pipelines step by step, moving things and outdoor places, stitching, speed measurements, what was tried and dropped, and the known limits.
 
-In short: a sentence becomes a blockout of boxes and generated shapes, an image model paints views that follow it, the views are made to agree and re-projected to about 115 training views, and a Gaussian splat is trained from them. Photos go through COLMAP, a splat trainer and Depth Pro for the mesh. The viewer is three.js with Spark for splats, Rapier for physics and Web Audio for sound.
+In short: a sentence becomes a blockout of boxes and generated shapes, an image model paints views that follow it, the views are made to agree and re-projected to about 115 training views, and a Gaussian splat is trained from them. Photos go through COLMAP, a splat trainer and Depth Pro for the mesh. The viewer is three.js with Spark for splats, Rapier for physics and Web Audio for sound; the three libraries are vendored in `thread/viewer/vendor/`, so there is no Node.js dependency.
 
 ## Repository layout
 

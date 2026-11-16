@@ -7,9 +7,9 @@
 set -e
 cd "$(dirname "$0")"
 export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
-stamp() { shasum setup.sh thread/requirements.txt spike/requirements.txt thread/viewer/package.json | shasum | cut -c1-16; }
+stamp() { shasum setup.sh thread/requirements.txt spike/requirements.txt | shasum | cut -c1-16; }
 if [[ "$1" == "--check" ]]; then
-  [[ -f .setup/done && "$(cat .setup/done)" == "$(stamp)" && -x thread/.venv/bin/python && -x spike/.venv/bin/python && -d thread/viewer/node_modules ]] && exit 0 || exit 1
+  [[ -f .setup/done && "$(cat .setup/done)" == "$(stamp)" && -x thread/.venv/bin/python && -x spike/.venv/bin/python ]] && exit 0 || exit 1
 fi
 step() { print -r -- "STEP: $1"; }
 fail() { print -r -- "ERROR: $1"; exit 1; }
@@ -17,9 +17,9 @@ fail() { print -r -- "ERROR: $1"; exit 1; }
 step "Checking for Homebrew"
 command -v brew >/dev/null || fail "Homebrew is not installed. Install it from https://brew.sh (it asks for your password), then run this again."
 
-step "Installing tools with Homebrew (uv, colmap, ollama, libusb, node)"
+step "Installing tools with Homebrew (uv, colmap, ollama, libusb)"
 export HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_ENV_HINTS=1
-for f in uv colmap ollama libusb node; do      # a tool already on PATH (node from nvm, say) is left alone
+for f in uv colmap ollama libusb; do      # a tool already on PATH is left alone
   if brew list --versions $f >/dev/null 2>&1 || { [[ $f != libusb ]] && command -v $f >/dev/null; }; then print "  $f: already installed"
   else brew install $f; fi
 done
@@ -31,9 +31,6 @@ uv pip install --python thread/.venv/bin/python -r thread/requirements.txt
 step "Python environment for the image models (spike/.venv)"
 [ -x spike/.venv/bin/python ] || uv venv --python 3.12 spike/.venv
 uv pip install --python spike/.venv/bin/python -r spike/requirements.txt
-
-step "Viewer packages"
-npm install --prefix thread/viewer --no-audit --no-fund
 
 step "Layout model (qwen3.5:9b, about 6 GB)"
 started=""
