@@ -4,3 +4,4 @@ pillow
 scipy
 open3d
 trimesh
+pycolmap==4.2.1

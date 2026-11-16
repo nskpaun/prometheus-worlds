@@ -31,16 +31,10 @@ def photos(d, name):
     stage("solving camera positions")
     for p in ("db.db", "sparse", "dense", "txt"):
         shutil.rmtree(f"{d}/{p}", ignore_errors=True) if os.path.isdir(f"{d}/{p}") else (os.path.exists(f"{d}/{p}") and os.remove(f"{d}/{p}"))
-    run(["colmap", "feature_extractor", "--database_path", f"{d}/db.db", "--image_path", f"{d}/images", "--ImageReader.single_camera", "0", "--ImageReader.camera_model", "SIMPLE_RADIAL"], quiet=True)
-    run(["colmap", "exhaustive_matcher", "--database_path", f"{d}/db.db"], quiet=True)
-    os.makedirs(f"{d}/sparse"); run(["colmap", "mapper", "--database_path", f"{d}/db.db", "--image_path", f"{d}/images", "--output_path", f"{d}/sparse"], quiet=True)
-    models = glob.glob(f"{d}/sparse/*/")
-    if not models: raise SystemExit("Could not solve camera positions: the photos need more overlap")
-    best = max(models, key=lambda m: os.path.getsize(m + "images.bin"))
-    run(["colmap", "image_undistorter", "--image_path", f"{d}/images", "--input_path", best, "--output_path", f"{d}/dense", "--output_type", "COLMAP"], quiet=True)
+    run([PY, "sfm.py", "solve", d], quiet=True)      # COLMAP, through pycolmap: features, matching, camera positions, undistorted images
     os.makedirs(f"{d}/dense/sparse/0")
     for b in glob.glob(f"{d}/dense/sparse/*.bin"): shutil.move(b, f"{d}/dense/sparse/0/")
-    os.makedirs(f"{d}/txt"); run(["colmap", "model_converter", "--input_path", f"{d}/dense/sparse/0", "--output_path", f"{d}/txt", "--output_type", "TXT"], quiet=True)
+    os.makedirs(f"{d}/txt"); run([PY, "sfm.py", "totxt", f"{d}/dense/sparse/0", f"{d}/txt"], quiet=True)
     n_reg = len([l for l in open(f"{d}/txt/images.txt") if l[0] != "#"]) // 2
     print(f"registered {n_reg} of {len(raw)} photos", flush=True)
     if n_reg < 5: raise SystemExit(f"Only {n_reg} photos could be placed: the photos need more overlap")
@@ -59,10 +53,6 @@ def photos(d, name):
     # scale disagrees with the viewer's own estimate by about 20% and one real measurement is needed to say which is right
     register(entry)
     stage("done")
-
-def port_open(p):
-    with socket.socket() as k:
-        k.settimeout(0.3); return k.connect_ex(("127.0.0.1", p)) == 0
 
 def prompt_entry(d, name, layout, style, room="gen_c"):
     """The scenes.json entry of a world built from a sentence, whose splat and mesh are in the folder `room` of d."""
@@ -102,20 +92,10 @@ def prompt(d, name, layout, style):
     need_plan = shaped and not planned
     if need_layout or need_plan:
         if need_layout: stage("planning the layout")
-        started = None
-        if not port_open(11434):
-            try: started = subprocess.Popen(["ollama", "serve"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            except OSError: pass                   # Ollama is not installed: the steps below say so in plain words
-            for _ in range(60 if started else 0):
-                if port_open(11434): break
-                time.sleep(0.25)
-        try:
-            if need_layout: run([PY, "llm_boxes.py", layout, f"{d}/boxes.json"])
-            if need_plan:
-                stage("choosing which objects get real shapes")
-                run([PY, "shapes.py", "plan", style], env, soft=True)
-        finally:
-            if started: started.terminate()            # one model in memory at a time
+        if need_layout: run([PY, "llm_boxes.py", layout, f"{d}/boxes.json"])    # the layout model runs in its own process and leaves memory when done
+        if need_plan:
+            stage("choosing which objects get real shapes")
+            run([PY, "shapes.py", "plan", style], env, soft=True)
     if shaped:      # each step loads one model, skips what exists, and on any failure leaves the objects as boxes
         stage("making shapes for the objects")
         t = time.time()

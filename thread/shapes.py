@@ -144,12 +144,9 @@ Answer with JSON only: {"things": [{"id": number, "shaped": true or false, "look
 - "look": one short phrase of at most 12 words naming ONE such thing as it would be photographed on its own: what it is, with its material, colour and period, in keeping with the scene and the style. Example: "a cream 1930s antique car". Describe a single thing even when the scene has several, and one whose proportions match its size and the words in brackets: a thing 2 wide and 0.9 deep is a straight sofa, never a corner or sectional one; a thing 1.2 wide and 2 high is a wide bookcase, never a narrow one. Name the thing alone: not what it stands on, not what stands on it, not the room, other things or people.
 '''
 
-def ask(prompt, model="qwen3.5:9b"):
-    import urllib.request
-    body = json.dumps({"model": model, "stream": False, "think": False, "keep_alive": 0, "options": {"temperature": 0.1, "num_ctx": 4096}, "prompt": prompt}).encode()
-    r = json.load(urllib.request.urlopen(urllib.request.Request("http://localhost:11434/api/generate", body), timeout=300))
-    txt = r["response"]
-    return json.loads(txt[txt.index("{"):txt.rindex("}") + 1])      # the MLX runner rejects "format": "json", so cut the JSON out of the text
+def ask(prompt):
+    import llm
+    return llm.json_in(llm.ask(prompt, max_tokens=2000)[0])
 
 def plan(style):
     world = json.load(open(f"{D}/boxes.json")); objs, room = world["objects"], world.get("room", [4.0, 2.6, 4.0])

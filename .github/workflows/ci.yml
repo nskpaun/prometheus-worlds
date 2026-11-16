@@ -15,7 +15,7 @@ jobs:
         with:
           node-version: "22"
       - name: Install test dependencies
-        run: pip install numpy pillow scipy open3d trimesh
+        run: pip install --require-hashes --only-binary :all: -r runtime/thread.lock
       - name: Python syntax
         run: python -m py_compile thread/*.py spike/*.py
       - name: Viewer syntax

@@ -27,3 +27,4 @@ ext/
 .build/
 xcuserdata/
 *.xcuserstate
+.runtime/

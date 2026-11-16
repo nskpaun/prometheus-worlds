@@ -10,7 +10,8 @@ not objects, only told to the painter. "rules": 2 marks a layout written since c
 The layout model is asked up to three times while faults() finds its layout poor for the description; the best is kept.
 Environment: WORLD_SETTING (indoor or outdoor) overrides the layout model's choice.
 """
-import json, sys, os, math, re, urllib.request, urllib.error
+import json, sys, os, math, re
+import llm
 
 FURNITURE = {  # width along the wall, depth out from the wall; built from several boxes each
     "sofa": (2.0, 0.9), "armchair": (0.85, 0.85), "coffee_table": (1.0, 0.6), "bookshelf": (1.2, 0.35),
@@ -616,24 +617,17 @@ def choose(req, tries=3, ask=None):
     k = min(range(len(got)), key=lambda k: (weight(fss[k]), k))
     return got[k], secs, fss[k], k + 1, len(got)
 
-def ask(req, model="qwen3.5:9b"):
-    body = json.dumps({"model": model, "stream": False, "think": False, "keep_alive": 0, "options": {"temperature": 0.1, "num_ctx": 8192}, "prompt": PROMPT + req}).encode()
-    r = json.load(urllib.request.urlopen(urllib.request.Request("http://localhost:11434/api/generate", body), timeout=300))
-    txt = r["response"]
-    return json.loads(txt[txt.index("{"):txt.rindex("}") + 1]), r["total_duration"] / 1e9
+def ask(req):
+    txt, secs = llm.ask(PROMPT + req, max_tokens=3000)
+    return llm.json_in(txt), secs
 
 if __name__ == "__main__":
     req, path = sys.argv[1], sys.argv[2]
     try:
         layout, secs, wrong, k, n = choose(req); info = {}
         room, objs = expand(layout, info)
-    except OSError as e:      # most specific first: HTTPError and TimeoutError are both OSErrors, and a connect timeout hides in URLError.reason
-        if isinstance(e, urllib.error.HTTPError):
-            if e.code == 404: raise SystemExit("The layout model has not been downloaded. Run: ollama pull qwen3.5:9b")
-            raise SystemExit(f"Ollama could not run the layout model (HTTP {e.code}). It may be out of memory; try again in a moment.")
-        if isinstance(e, TimeoutError) or isinstance(getattr(e, "reason", None), TimeoutError):
-            raise SystemExit("The layout model took too long to answer. Try again, or describe the space more simply.")
-        raise SystemExit("Could not reach the layout model. Check that Ollama is running.")
+    except TimeoutError: raise SystemExit("The layout model took too long to answer. Try again, or describe the space more simply.")
+    except OSError as e: raise SystemExit(f"The layout model could not run: {e}")
     except Exception:
         raise SystemExit("The layout model did not return a usable plan. Try describing the space more simply.")
     if not objs: raise SystemExit("The layout model's plan had nothing solid in it. Try naming the main things in the space.")

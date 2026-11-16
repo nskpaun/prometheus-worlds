@@ -394,8 +394,8 @@ def write(results, out, bare=False):
     open(f"{out}/sparse/0/cameras.txt", "w").write(f"1 PINHOLE {W} {H} {f} {f} {W/2} {H/2}\n")
     open(f"{out}/sparse/0/images.txt", "w").write("".join(im_lines))
     open(f"{out}/sparse/0/points3D.txt", "w").write("".join(f"{i+1} {p[0]} {p[1]} {p[2]} {int(c[0])} {int(c[1])} {int(c[2])} 0.5\n" for i, (p, c) in enumerate(pts)))
-    r = subprocess.run(["colmap", "model_converter", "--input_path", f"{out}/sparse/0", "--output_path", f"{out}/sparse/0", "--output_type", "BIN"], capture_output=True, text=True)
-    if r.returncode or not os.path.exists(f"{out}/sparse/0/images.bin"): sys.exit("colmap model_converter failed:\n" + (r.stdout + r.stderr)[-2000:])
+    r = subprocess.run([sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "sfm.py"), "tobin", f"{out}/sparse/0"], capture_output=True, text=True)
+    if r.returncode or not os.path.exists(f"{out}/sparse/0/images.bin"): sys.exit("converting the camera model failed:\n" + (r.stdout + r.stderr)[-2000:])
     json.dump([[list(map(float, e)), list(map(float, l))] for e, l in tgt], open(f"{out}/cams.json", "w"))
     fill = [1 - p[5].mean() for p in pending]; nl = len(tgt) - n_up
     print(*(["without the moving things:"] if bare else []), "wrote", len(tgt), "views (%d looking up); filled by flat colour: %.1f%%" % (n_up, 100 * np.mean(fill)), "(level views %.1f%%, upward views %.1f%%)" % (100 * np.mean(fill[:nl]), 100 * np.mean(fill[nl:] or [0])),

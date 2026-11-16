@@ -25,10 +25,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         return Int(UInt16(bigEndian: a.sin_port))
     }
 
-    // tools the pipelines call (brew, colmap, ollama, uv) live in Homebrew, which apps do not get on PATH by default
+    // everything the pipelines run is inside the project folder; only system tools (sips, git, xcrun, curl) come from PATH
     func environment() -> [String: String] {
         var env = ProcessInfo.processInfo.environment
-        env["PATH"] = "/opt/homebrew/bin:/usr/local/bin:" + (env["PATH"] ?? "/usr/bin:/bin")
+        env["PATH"] = env["PATH"] ?? "/usr/bin:/bin"
         return env
     }
 

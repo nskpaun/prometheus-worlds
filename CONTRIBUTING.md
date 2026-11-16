@@ -49,3 +49,17 @@ CI runs the same tests plus syntax checks on every pull request. It cannot run t
 ## Reporting a problem
 
 Open an issue with the bug template. Include the prompt or the number of photos, the detail level, the last lines of the world's `job.log`, and a screenshot.
+
+## Pinned versions
+
+Every download is pinned so every Mac gets the same thing:
+
+- **Python packages:** `runtime/thread.in` and `runtime/paint.in` list what each environment needs; `runtime/*.lock` pin every package with hashes. To change a package, edit the `.in` file and regenerate its lock (this is the only place a developer tool is needed):
+
+  ```bash
+  MACOSX_DEPLOYMENT_TARGET=14.0 uv pip compile runtime/thread.in --generate-hashes --python-version 3.12 --python-platform aarch64-apple-darwin -o runtime/thread.lock
+  ```
+
+- **Python itself, the models and the shape-model source:** URLs, revisions and checksums at the top of `setup.sh`.
+
+Changing either makes `setup.sh` run again on everyone's next launch.
