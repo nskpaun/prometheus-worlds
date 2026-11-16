@@ -1,0 +1,25 @@
+name: CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+jobs:
+  check:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Install test dependencies
+        run: pip install numpy pillow scipy open3d trimesh
+      - name: Python syntax
+        run: python -m py_compile thread/*.py spike/*.py
+      - name: Viewer syntax
+        run: for f in thread/viewer/*.js; do node --check "$f"; done
+      - name: Unit tests
+        working-directory: thread
+        run: python -m unittest discover tests
