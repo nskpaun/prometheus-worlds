@@ -4,6 +4,8 @@
 
 How good a world can you generate on a 64 GB Mac? This project wants to find out. It is open source, and contributions are welcome.
 
+**[Join the Discord](https://discord.gg/MgucVj7sJ)** · [Website](https://prometheus-worlds.vercel.app)
+
 ![Snowy Village Square, built from one sentence](docs/snow-village.webp)
 
 | | |
@@ -129,7 +131,7 @@ In short: a sentence becomes a blockout of boxes and generated shapes, an image 
 
 ## Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md). In short: open an issue or a pull request, or fork it and send a link to your fork.
+See [CONTRIBUTING.md](CONTRIBUTING.md). In short: open an issue or a pull request, or fork it and send a link to your fork. Questions and show-and-tell go in the [Discord](https://discord.gg/MgucVj7sJ).
 
 ## License
 
