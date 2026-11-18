@@ -2,6 +2,8 @@
   pipeline.py photos WORLD_DIR "Name"                    WORLD_DIR/raw/* photos -> splat + mesh + collider
   pipeline.py prompt WORLD_DIR "Name" "LAYOUT" "STYLE"   sentence + style -> blockout -> pictures -> splat
 Each step prints a 'STAGE: ...' line. On success the world is added to scenes.json.
+A prompt build is held to WORLD_MINUTES (default 20; 0 for no limit): painting is nearly all of it, so once the layout
+and the shapes are made, the time that is left decides how many pictures are painted (paint_views).
 """
 import sys, os, re, json, subprocess, shutil, glob, socket, time, hashlib
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -70,8 +72,34 @@ def prompt_entry(d, name, layout, style, room="gen_c"):
     if m.get("movers"): entry["movers"] = [{**v, **{k: f"{rel}/{v[k]}" for k in ("ply", "mesh", "collider") if k in v}} for v in m["movers"]]
     return entry
 
+PAINT_S = 56.0      # seconds to paint one picture at 768x576 in 8 steps on an M4 Pro (measured 55.8)
+def paint_seconds(size, steps=8):
+    """Seconds to paint one picture of that size. Measured: 55.8 s at 768x576, 42.9 s at 640x480 (smaller pictures do
+    not pay: 0.69 of the pixels for 0.77 of the time), about 148 s at 1024x768 (160 s before the painter's 12 s a view of
+    mask filters went). A step is 6.85 s of the 56, the rest is per picture."""
+    px = size[0] * size[1] / (768 * 576)
+    return PAINT_S * (px ** 1.69 if px > 1 else 0.3 + 0.7 * px) * (1 + 6.85 * steps) / (1 + 6.85 * 8)
+
+def paint_views(d, spent, size, steps=8, limit=None):
+    """How many ordinary pictures there is time to paint: what is left of the limit after `spent` seconds (the layout
+    and the shapes) and after what follows the painting, over the seconds a picture takes. None for no limit.
+    What follows, measured on worlds of 114 to 136 training views: the blockout and the plan 16 s; making the views
+    agree 60 to 80 s, and 60 more for the second set when things move away; training 75 s, and again for that set;
+    the mesh, the moving things and loading the painter 10 s."""
+    if limit is None:
+        try: limit = 60 * float(os.environ.get("WORLD_MINUTES", "20"))
+        except ValueError: limit = 1200.0
+    if limit <= 0: return None
+    try:
+        with open(f"{d}/boxes.json") as h: w = json.load(h)
+        n = len(w["objects"])
+        moving = any(isinstance(m, dict) and type(m.get("i")) is int and 0 <= m["i"] < n and m.get("type") in ("swing", "spin", "bob", "path") for m in w.get("motions") or [])
+    except (OSError, ValueError, KeyError, TypeError): moving = False
+    after = 16 + 85 + 75 + 10 + (60 + 75 if moving else 0)
+    return max(0.0, (limit - spent - after) / paint_seconds(size, steps))
+
 def prompt(d, name, layout, style):
-    os.makedirs(d, exist_ok=True)
+    os.makedirs(d, exist_ok=True); t0 = time.time()
     n_views = int(os.environ.get("WORLD_VIEWS", "12"))
     # the full detail level paints at 1024x768; the others at 768x576, which is about twice as fast per view
     env = {"WORLD_DIR": os.path.relpath(d, HERE), "WORLD_VIEWS": str(n_views),
@@ -102,6 +130,17 @@ def prompt(d, name, layout, style):
         run([PY_IMG, "shapes.py", "pictures"], env, soft=True)
         run([PY, "shapes.py", "build"], env, soft=True)        # also after a failure above: it uses the pictures that were made
         print(f"shapes took {time.time() - t:.0f} s", flush=True)
+    # the time that is left decides what is painted (chisel_ring prep plans it). The full detail level's 1024x768 takes
+    # 2.6 times as long a picture: when under 8 of them would fit, the pictures are 768x576 like the other levels'
+    size = lambda: [int(v) for v in env["WORLD_PAINT"].split("x")]; steps = 6 if n_views <= 8 else 8
+    try:
+        views = paint_views(d, time.time() - t0, size(), steps)
+        if views is not None and views < 8 and "WORLD_PAINT" not in os.environ and size()[0] > 768:
+            env["WORLD_PAINT"] = "768x576"; views = paint_views(d, time.time() - t0, size(), steps)
+    except (ValueError, IndexError): views = None
+    if views is not None and "WORLD_PAINT_VIEWS" not in os.environ:
+        env["WORLD_PAINT_VIEWS"] = f"{views:.2f}"
+        print(f"{time.time() - t0:.0f} s so far: time to paint {views:.1f} pictures of {env['WORLD_PAINT']}", flush=True)
     stage("rendering the blockout")
     run([PY, "chisel_ring.py", "prep"], env)
     stage("painting views")

@@ -503,10 +503,32 @@ print(json.dumps([[g[0] for g in C.GROUNDS], [C.view_prompt(i, 'x') for i in ran
     @unittest.skipUnless(os.path.exists(f"{WORLDS}/garage-shapes/depth/00.png"), "the garage-shapes world is not on this Mac")
     def test_garage_depth_unchanged(self):
         src = f"{WORLDS}/garage-shapes"; shutil.copy(f"{src}/boxes.json", self.tmp); shutil.copytree(f"{src}/shapes", f"{self.tmp}/shapes")
-        self.assertIn("depth maps 18", chisel(self.tmp, "C.prep()"))
         def md5(f):
             with open(f, "rb") as h: return hashlib.md5(h.read()).hexdigest()
-        for i in range(18): self.assertEqual(md5(f"{self.tmp}/depth/{i:02d}.png"), md5(f"{src}/depth/{i:02d}.png"), i)
+        same = lambda: [md5(f"{self.tmp}/depth/{i:02d}.png") == md5(f"{src}/depth/{i:02d}.png") for i in range(18)]
+        # as built by default: every map as it was, and no plan is written
+        self.assertIn("depth maps 18", chisel(self.tmp, "C.prep()")); self.assertEqual(same(), [True] * 18); self.assertFalse(os.path.exists(f"{self.tmp}/lookdown.json"))
+        os.environ["WORLD_LOOKDOWN"] = "plan"; self.addCleanup(os.environ.pop, "WORLD_LOOKDOWN", None)      # the rest: with the planner asked for
+        # a world that already has pictures keeps the cameras they were painted from
+        os.makedirs(f"{self.tmp}/gen/images"); open(f"{self.tmp}/gen/images/00.png", "w").close()
+        with open(f"{self.tmp}/gen/views.json", "w") as h: h.write("{}")
+        chisel(self.tmp, "C.prep()"); self.assertEqual(same(), [True] * 18); self.assertFalse(os.path.exists(f"{self.tmp}/lookdown.json"))
+        # a world with no pictures: the ring is as it was, the six views after it are placed by what the ring leaves unpainted
+        shutil.rmtree(f"{self.tmp}/gen"); out = chisel(self.tmp, "C.prep()"); self.assertIn("depth maps 18", out); self.assertIn("downward views placed", out)
+        got = same(); self.assertEqual(got[:12], [True] * 12); self.assertFalse(any(got[12:]))
+        with open(f"{self.tmp}/lookdown.json") as h: plan = json.load(h)
+        self.assertEqual(len(plan["cams"]), 6)
+        for eye, look in plan["cams"]:      # inside the room, at the height of the views they replace, looking down
+            self.assertTrue(0.5 < eye[0] < 11.5 and 0.5 < eye[2] < 9.5); self.assertAlmostEqual(eye[1], 2.1); self.assertLess(look[1], eye[1] - 0.5)
+        # the plan is read back (the painter and the agree step see the same cameras), and dropped when the layout changes
+        cams = "print(json.dumps([[list(e), list(l)] for e, l in list(C.B.CAMS.values())[12:]]))"
+        os.environ.pop("WORLD_LOOKDOWN")                                 # a plan that exists is used whether or not planning is asked for
+        self.assertEqual(json.loads(chisel(self.tmp, cams)), plan["cams"]); maps = [md5(f"{self.tmp}/depth/{i:02d}.png") for i in range(18)]
+        chisel(self.tmp, "C.prep()"); self.assertEqual(maps, [md5(f"{self.tmp}/depth/{i:02d}.png") for i in range(18)])
+        with open(f"{self.tmp}/boxes.json") as h: w = json.load(h)
+        w["room"][0] += 1
+        with open(f"{self.tmp}/boxes.json", "w") as h: json.dump(w, h)
+        self.assertNotEqual(json.loads(chisel(self.tmp, cams)), plan["cams"])
 
 if __name__ == "__main__":
     unittest.main()

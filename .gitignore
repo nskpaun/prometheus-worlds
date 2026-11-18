@@ -13,6 +13,7 @@ thread/*.log
 thread/cp*.png
 thread/cp*.jpg
 thread/hour-rooms-novel.jpg
+thread/evals/work/
 spike/out/
 *.ply
 *.npy
@@ -30,3 +31,4 @@ xcuserdata/
 .runtime/
 __pycache__/
 *.pyc
+thread/experiments/*/work/

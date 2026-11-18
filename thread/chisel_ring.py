@@ -6,7 +6,16 @@ WORLD_CHAIN (0 to paint every view on its own; default 1: each view is given wha
 WORLD_RELIEF (metres the layout's roads, ponds and rugs are sunk in the painter's depth map; 0 for none; default 0.12
 outdoors and -0.03, a raised rug, indoors).
 A layout with "rules": 2 (llm_boxes.py writes it) has its painted cameras keep clear of posts and open frames; an older
-world keeps the cameras its pictures were painted from. prep also writes depth/start.json: the painted view to start in.
+world keeps the cameras its pictures were painted from. prep also writes depth/start.json: the painted view to start in,
+and, with WORLD_LOOKDOWN=plan and no pictures yet, lookdown.json: where the views painted after the ring stand (plan_lookdown).
+With WORLD_DETAIL_PLAN=1 (OFF by default: it did not make near walls sharper, see plan_detail), WORLD_PAINT_VIEWS (how many
+ordinary pictures there is time to paint; pipeline.py works it out from the time limit) makes
+prep choose what is painted (detail.py; written to detail.json beside boxes.json): the ring views a walker misses least
+are left out, and up to WORLD_DETAIL (default 6; 0 for none) "detail" pictures are added, taken from standing spots
+near the walls and floor a walker comes close to. Only views a walker does not miss are left out, so a world whose
+shapes took long runs over the limit; WORLD_STRICT=1 holds the limit and leaves out what it must. A detail picture is started from what the ring already painted of its
+view (WORLD_DETAIL_START: the step of 8 it starts at, default 5; 0 paints it afresh inside a kept rim), so it is the same
+wall, finer. Without WORLD_PAINT_VIEWS, and for a world painted before, every view is painted as it always was.
 """
 import sys, json, os, re, time, hashlib
 import numpy as np
@@ -112,6 +121,19 @@ except (OSError, ValueError, KeyError, TypeError, AttributeError): pass
 c = np.array([RW / 2, 0.0, RD / 2])
 EYE = 1.5 if RH < 3.2 else 1.7
 
+def grow(m, px):
+    """A mask widened by px // 2 pixels each way: PIL's MaxFilter(px) on a mask, to the pixel, in milliseconds (PIL's
+    takes 1.5 s at 65 px; the painter spent 12 s a view in it)."""
+    r = int(px) // 2; out = np.asarray(m, bool)
+    for ax in (0, 1):
+        pad = [(0, 0), (0, 0)]; pad[ax] = (r + 1, r); n = out.shape[ax]
+        cs = np.cumsum(np.pad(out, pad, mode="edge"), ax, dtype=np.int32)
+        out = (np.take(cs, np.arange(2 * r + 1, 2 * r + 1 + n), ax) - np.take(cs, np.arange(n), ax)) > 0
+    return out
+def shrink(m, px):
+    """A mask narrowed by px // 2 pixels each way: PIL's MinFilter(px)."""
+    return ~grow(~np.asarray(m, bool), px)
+
 def free(eye, margin=0.25):
     """A camera position that is not inside (or right against) any shape: the given spot, else the nearest free spot
     found by sliding towards or away from the room's centre. None if there is none."""
@@ -171,12 +193,112 @@ for i in range(n_extra):
     a = 2 * np.pi * (i + 0.5) / n_extra; off = np.array([np.cos(a) * RW, 0, np.sin(a) * RD])
     eye = (stand if NEW else free)(c + off * 0.3 + [0, min(RH - 0.3, EYE + 0.6), 0])
     if eye is not None: B.CAMS[str(len(B.CAMS))] = (tuple(eye), tuple(c - off * 0.08))
-N = len(B.CAMS)                                                       # every painted view: the ring, then the downward ones
+# ...all looking across the middle. A world planned by prep() (lookdown.json beside boxes.json; only with
+# WORLD_LOOKDOWN=plan, see plan_lookdown for why it is off) has them where the ring leaves the most that a walker comes
+# close to without paint: the floor a platform in the middle hides from the far side of the ring. The plan holds for
+# the layout and shapes it was made for; a world without one keeps the cameras its pictures were painted from
+PLAN = f"{D}/lookdown.json"
+PLAN_STAMP = hashlib.md5(json.dumps([[RW, RH, RD], [o["prims"] for o in objs], SHAPE_SUMS, RING, NEW, world.get("motions")], sort_keys=True).encode()).hexdigest()
+def use_plan(cams):
+    """Put the planned cameras in place of the first of the downward views (the view count stays what it was)."""
+    for i, cam in enumerate(cams[:len(B.CAMS) - RING]): B.CAMS[str(RING + i)] = (tuple(map(float, cam[0])), tuple(map(float, cam[1])))
+LOOKDOWN = None                                                       # the planned cameras in use, for the painter's record
+try:
+    plan_ = json.load(open(PLAN))
+    if plan_["stamp"] == PLAN_STAMP and all(len(e) == 3 and len(l) == 3 for e, l in plan_["cams"]): LOOKDOWN = plan_["cams"]; use_plan(LOOKDOWN)
+except (OSError, ValueError, KeyError, TypeError): pass
+N = len(B.CAMS)                                                       # the ring, then the downward views: what is painted without a plan
+# A world planned by prep() for a painting budget (detail.json beside boxes.json; detail.py) leaves some of those out
+# (SKIP: they stay training views, which cost no painting) and has ND detail views after them, numbered N, N + 1, ...
+DETAIL_FILE = f"{D}/detail.json"
+SKIP, ND, DETAIL = set(), 0, None                                     # DETAIL: the plan in use, for the painter's record
+def use_detail(plan):
+    """Take a plan {"drop": [view, ...], "views": [[eye, look], ...]} into use."""
+    global SKIP, ND, DETAIL
+    for k in [k for k in B.CAMS if int(k) >= N]: del B.CAMS[k]
+    SKIP = {int(v) for v in plan["drop"] if 0 < int(v) < N}; ND = len(plan["views"])
+    for k, cam in enumerate(plan["views"]): B.CAMS[str(N + k)] = (tuple(map(float, cam[0])), tuple(map(float, cam[1])))
+    DETAIL = {"drop": sorted(SKIP), "views": [[list(map(float, e)), list(map(float, l))] for e, l in plan["views"]]}
+try:
+    plan_ = json.load(open(DETAIL_FILE))
+    if plan_["stamp"] == PLAN_STAMP and all(len(e) == 3 and len(l) == 3 for e, l in plan_["views"]): use_detail(plan_)
+except (OSError, ValueError, KeyError, TypeError): pass
+def painted():
+    """The views that are painted, in painting order: the ring views that are kept, then the detail views."""
+    return [i for i in range(N) if i not in SKIP] + list(range(N, N + ND))
+# The step of 8 a detail picture starts at, from the ring's paint. Painted on one wall of the tower room: from noise
+# inside a kept rim it is another wall (its coarse shapes agree 0.14 with the ring's paint); from step 3, 0.75 (the
+# table has other legs, the candles have moved); step 4, 0.87; step 5, 0.94: the same table and candles, with clean edges
+# where the ring's paint enlarged is a smear; step 6, 0.98, with less gained
+try: START_STEP = min(7, max(0, int(os.environ.get("WORLD_DETAIL_START", "5"))))
+except ValueError: START_STEP = 5
+# ...and its painting time as a share of an ordinary picture's: measured 55.8 s for 8 steps at 768x576, 34.4 s from step
+# 3, 26.5 from 4, 22.4 from 5, 14.8 from 6
+DETAIL_COST = (8.3 - START_STEP) / 8.3 if START_STEP else 1.0
+
+def plan_lookdown():
+    """Choose the downward views by what the ring leaves unpainted (owner.lookdown) and write the plan. Only for a world
+    with no pictures yet: one painted for other cameras keeps them. -> the ring's traces, to use again.
+    OFF unless WORLD_LOOKDOWN=plan. Painted and trained on the garage and the tower room (experiments/gaps/NOTES.md),
+    it left 0.4% and 1.8% of what a walker sees close up without paint (2.6% and 3.2% without it), but the planned views
+    show stretches of open floor, and on three of the garage's six the painter stood a car that is not in the layout;
+    it then lies flat on the floor of the world. Saying "the floor is plain and unbroken" did not stop it."""
+    global LOOKDOWN
+    import glob
+    if LOOKDOWN is not None or os.environ.get("WORLD_LOOKDOWN") != "plan" or N <= RING: return {}
+    for f in glob.glob(f"{D}/*/views.json"):
+        try: unplanned = "lookdown" not in json.load(open(f))
+        except (OSError, ValueError, TypeError): unplanned = True
+        if unplanned and glob.glob(os.path.dirname(f) + "/images/*.png"): return {}
+    import owner as O
+    traced = {i: B.trace(B.CAMS[str(i)], PRIM_OBJ, True) for i in range(RING)}
+    band = lambda sid: (lambda on: O.big(on, HALO) & ~on)(np.isin(sid, [6 + oi for oi in {*SHAPES, *(SLIM if NEW else ())}]))      # halo(), 80 times quicker
+    views = [O.view(B.CAMS[str(i)], traced[i][0], traced[i][2], band(traced[i][2]), LIFT) for i in range(RING)]
+    rank = O.rank(np.stack([np.bincount(v[2].ravel(), minlength=6 + len(objs)) for v in views], 1).astype(float))
+    cams = [[list(map(float, e)), list(map(float, l))] for e, l in O.lookdown(sys.modules[__name__], views, rank, N - RING, LIFT)]
+    json.dump({"stamp": PLAN_STAMP, "cams": cams}, open(PLAN + ".tmp", "w")); os.replace(PLAN + ".tmp", PLAN)
+    LOOKDOWN = cams; use_plan(cams)
+    print("downward views placed by what the ring leaves unpainted:", len(cams), "of", N - RING)
+    return traced
+
+def plan_detail(traced):
+    """Choose what to paint for the time there is (detail.plan) and write the plan. Only when WORLD_PAINT_VIEWS says how
+    many ordinary pictures there is time for, and only for a world with no pictures yet, or one painted to a plan before
+    (WORLD_DETAIL_REPLAN=1: whatever was painted). -> the traces of the views in use, to use again."""
+    import glob
+    # OFF unless WORLD_DETAIL_PLAN=1. Painted and trained on the three reference worlds (labels detail1 to detail3,
+    # evals/work/results.jsonl): near walls came out no sharper (sharp_wall 0.177 -> 0.167 to 0.182 in the tower room,
+    # 0.154 -> 0.132 in the garage) and holding the time limit left 13% to 18% of what a walker sees close up without paint
+    if os.environ.get("WORLD_DETAIL_PLAN") != "1": return traced
+    try: budget = float(os.environ["WORLD_PAINT_VIEWS"])
+    except (KeyError, ValueError): return traced
+    if os.environ.get("WORLD_DETAIL_REPLAN") != "1":
+        for f in glob.glob(f"{D}/*/views.json"):
+            if not glob.glob(os.path.dirname(f) + "/images/*.png"): continue
+            try: unplanned = "detail" not in json.load(open(f))
+            except (OSError, ValueError, TypeError): unplanned = True
+            if unplanned or DETAIL is not None: return traced             # painted before: as it was painted (a build taken up again keeps its plan)
+    try: most = max(0, int(os.environ.get("WORLD_DETAIL", "6")))
+    except ValueError: most = 6
+    import detail
+    use_detail({"drop": [], "views": []})
+    traced = {i: traced[i] if i in traced else B.trace(B.CAMS[str(i)], PRIM_OBJ, True) for i in range(N)}
+    t0 = time.time(); plan = detail.plan(sys.modules[__name__], traced, budget, most, DETAIL_COST, os.environ.get("WORLD_STRICT") == "1")
+    json.dump({"stamp": PLAN_STAMP, "budget": budget, **plan}, open(DETAIL_FILE + ".tmp", "w")); os.replace(DETAIL_FILE + ".tmp", DETAIL_FILE)
+    use_detail(plan)
+    print(f"time for {budget:g} pictures: {N - len(SKIP)} of the {N} usual views and {ND} detail views are painted (left out: {sorted(SKIP)}); planned in {time.time() - t0:.1f} s", flush=True)
+    if plan["over"] > 0.05: print(f"that is {plan['over']:g} pictures' time over the limit: leaving out more would leave surface a walker sees without paint (WORLD_STRICT=1 does it)", flush=True)
+    return traced
 
 def prep():
     os.makedirs(f"{D}/depth", exist_ok=True); best = (-1e9, 0)
+    traced = plan_lookdown()                                          # before the depth maps: it moves the downward views
+    traced = plan_detail(traced)                                      # ...and this one leaves views out and adds others
+    for f in os.listdir(f"{D}/depth"):                                # an earlier plan's maps of views that are not painted now
+        if f[:2].isdigit() and int(f[:2]) not in painted(): os.remove(f"{D}/depth/{f}")
     for k, cam in B.CAMS.items():
-        t, P, sid, nrm = B.trace(cam, PRIM_OBJ, True)
+        if int(k) in SKIP: continue                                   # not painted: no depth map is needed
+        t, P, sid, nrm = traced[int(k)] if int(k) in traced else B.trace(cam, PRIM_OBJ, True)
         inv = 1 / np.maximum(t, 0.3)
         if GROUNDS and RELIEF:      # only in the picture the painter is guided by: a road or pond lies a little below the ground around it, so its edges show
             g = ground_at(P); m = (sid == 1) & (g >= 0) & ~np.isin(g, [j for j, v in enumerate(GROUNDS) if v[-1]])
@@ -187,6 +309,7 @@ def prep():
         # robust contrast: a few very near pixels must not flatten the rest of the map, and far walls need visible steps
         if OUT: inv[np.isin(sid, BACKDROP)] = 0                         # the backdrop and sky are endlessly far: pure black
         lo, hi = np.percentile(inv, [1, 99])
+        if int(k) >= N: lo = min(lo, hi / 2.5)                          # a detail view may face one wall: stretched to full contrast a flat wall turns into a bowl
         if OUT: lo = 0
         img = np.clip((inv - lo) / max(hi - lo, 1e-6), 0, 1) ** 0.6
         Image.fromarray((img * 255).astype(np.uint8)).convert("RGB").save(f"{D}/depth/{int(k):02d}.png")
@@ -194,7 +317,7 @@ def prep():
         np.savez_compressed(f"{D}/depth/{int(k):02d}.npz", t=t, sid=sid.astype(np.int16), n=np.round(nrm * 127).astype(np.int8), shapes=json.dumps(SHAPE_SUMS))   # for surfaces()
     eye, look = B.CAMS[str(-best[1])]
     json.dump({"view": -best[1], "eye": list(map(float, eye)), "look": list(map(float, look))}, open(f"{D}/depth/start.json", "w"))   # in room metres
-    print("depth maps", N)
+    print("depth maps", len(painted()))
 
 GRAZE = 0.3   # a shape's surface counts as seen side-on below this cosine between its normal and the direction to the camera
 
@@ -206,7 +329,7 @@ def halo(sid, also=(), px=HALO):
     also: more objects (by index) to treat the same way, shaped or not. px: the filter size, twice the band's width."""
     on = np.isin(sid, [6 + oi for oi in {*SHAPES, *also}])
     if not on.any(): return np.zeros(sid.shape, bool)
-    return (np.asarray(Image.fromarray((on * 255).astype(np.uint8)).filter(ImageFilter.MaxFilter(int(px) | 1))) > 127) & ~on
+    return grow(on, int(px) | 1) & ~on
 
 def surfaces(i):
     """Depth, surface id and shape normal (zero off shapes) per pixel of painted view i, as saved by prep: the painting
@@ -323,14 +446,13 @@ def mend(have, col, sid, px=MEND):
     view, the band left out around a shape. Given a strip of lawn to fill between two painted stretches, the painter
     lays a path along it, another in every view. A gap takes the paint beside it on the same face, softened; the margin
     kept clear around every silhouette stays open. -> (have, col)"""
-    big = lambda m, f: np.asarray(Image.fromarray((m * 255).astype(np.uint8)).filter(f)) > 127
     need = np.zeros(sid.shape, bool)
     for f in np.unique(sid[sid < 6]):
         a = have & (sid == f)
-        if a.any(): need |= big(big(a, ImageFilter.MaxFilter(px)), ImageFilter.MinFilter(px)) & (sid == f) & ~have
+        if a.any(): need |= shrink(grow(a, px), px) & (sid == f) & ~have
     edge = np.zeros(sid.shape, bool)
     for ax in (0, 1): d = sid != np.roll(sid, 1, ax); edge |= d | np.roll(d, -1, ax)
-    need &= ~big(edge, ImageFilter.MaxFilter(13))
+    need &= ~grow(edge, 13)
     if not need.any(): return have, col
     src = np.where(have, np.arange(sid.size).reshape(sid.shape), -1)      # the carried-over pixel each pixel takes its paint from
     def shift(a, d, off):      # a moved one pixel, the row or column that would come round from the far edge set to `off`
@@ -348,10 +470,17 @@ def mend(have, col, sid, px=MEND):
     col[got] = blur[got]
     return on, col
 
+RIM = 0.12     # share of a detail picture's width and height, at each edge, that is kept as the ring painted it
+
 def carry_over(i, done):
     """What earlier pictures already show of view i: (picture, keep mask) at the working size, or None.
     A pixel is carried over when an earlier view sees the same surface at the same place; the first view to do so wins,
-    so every surface keeps the look it was first given."""
+    so every surface keeps the look it was first given.
+    A detail view (i >= N) is all carried over, coarsely: it is there to be painted again, finer. Only its rim is kept,
+    and two more things come back: the whole carried-over picture, its gaps closed with a blur of the paint around them,
+    for the painter to start from, and the mask of what was carried over. (When the ring shows under a third of the
+    view it is painted like any other.) Begun so late, the painter leaves a gap the flat blur it was given: the mask is
+    saved beside the picture (begun/NN.png) and a detail view never owns what it did not begin from paint."""
     t, sid, nrm = surfaces(i)
     eye, d = B.rays(B.CAMS[str(i)]); P = eye + d * t[..., None]
     shape = np.abs(nrm).sum(-1) > 0
@@ -367,10 +496,44 @@ def carry_over(i, done):
             ok &= ~shape | ((to * nrm).sum(-1) >= GRAZE * np.linalg.norm(to, axis=-1))
         col[ok] = img[yi[ok], xi[ok]]; have |= ok
     # stay clear of silhouettes, where reprojection is least reliable (a 13 px minimum filter shrinks the mask by 6 px)
-    have = np.asarray(Image.fromarray((have * 255).astype(np.uint8)).filter(ImageFilter.MinFilter(13))) > 127
+    have = shrink(have, 13)
     have, col = mend(have, col, sid)
     if have.mean() < 0.03: return None
-    return Image.fromarray(col.astype(np.uint8)), Image.fromarray((have * 255).astype(np.uint8))
+    if i < N or have.mean() < 0.33: return Image.fromarray(col.astype(np.uint8)), Image.fromarray((have * 255).astype(np.uint8))
+    soft = lambda a: np.asarray(Image.fromarray(a).filter(ImageFilter.GaussianBlur(24)), np.float32)
+    w = soft((have * 255).astype(np.uint8))[..., None]; fill = np.where(w > 2, soft((col * have[..., None]).astype(np.uint8)) * 255 / np.maximum(w, 1), col[have].mean(0))
+    start = np.where(have[..., None], col, fill)
+    yy, xx = np.mgrid[:B.H, :B.W]; rim = (np.minimum(xx, B.W - 1 - xx) < RIM * B.W) | (np.minimum(yy, B.H - 1 - yy) < RIM * B.H)
+    keep = have & rim if os.environ.get("WORLD_DETAIL_RIM", "1") != "0" else np.zeros_like(have)
+    return Image.fromarray(col.astype(np.uint8)), Image.fromarray((keep * 255).astype(np.uint8)), Image.fromarray(np.clip(start, 0, 255).astype(np.uint8)), Image.fromarray((have * 255).astype(np.uint8))
+
+def paint_from(model, start, k, seed, prompt, controls, steps, w, h):
+    """One picture as model.generate_image paints it, but begun at step k of `steps` from the picture `start` with that
+    step's share of noise laid over it, not from noise alone: the coarse look is `start`'s, the fine detail is new.
+    (mflux's own loop for this model takes no picture to start from; this is that loop.)"""
+    import mlx.core as mx
+    from mflux.models.common.config.config import Config
+    from mflux.models.common.vae.vae_util import VAEUtil
+    from mflux.models.z_image.latent_creator import ZImageLatentCreator
+    from mflux.models.z_image.model.z_image_text_encoder.prompt_encoder import PromptEncoder
+    from mflux.models.z_image.variants.controlnet.controlnet_util import ZImageControlnetUtil
+    from mflux.utils.image_util import ImageUtil
+    config = Config(width=w, height=h, guidance=0.0, scheduler="linear", model_config=model.model_config, num_inference_steps=steps, controlnet_strength=1.0)
+    noise = ZImageLatentCreator.create_noise(seed=seed, height=config.height, width=config.width)
+    clean = ZImageLatentCreator.pack_latents(model.vae.encode(ImageUtil.to_array(start.convert("RGB").resize((config.width, config.height), Image.LANCZOS))), config.height, config.width)
+    sigmas = config.scheduler.sigmas; sg = float(sigmas[k])
+    latents = ((1 - sg) * clean + sg * noise).astype(noise.dtype)
+    text = PromptEncoder.encode_prompt(prompt=prompt, tokenizer=model.tokenizers["z_image"], text_encoder=model.text_encoder)
+    enc = ZImageControlnetUtil.encode_controls(vae=model.vae, width=config.width, height=config.height, controls=controls, control_in_dim=model.controlnet.config.control_in_dim)
+    for t in range(k, steps):
+        merged = {}
+        for lat, scale in zip(enc.control_latents, enc.strengths):
+            for key, v in model.controlnet(x=latents, t=t, sigmas=sigmas, cap_feats=text, control_context=lat, conditioning_scale=float(scale)).items():
+                merged[key] = merged[key] + v if key in merged else v
+        pred = model.transformer(timestep=t, x=latents, cap_feats=text, sigmas=sigmas, controlnet_block_samples=merged)
+        latents = config.scheduler.step(noise=pred, timestep=t, latents=latents); mx.eval(latents)
+    decoded = VAEUtil.decode(vae=model.vae, latent=ZImageLatentCreator.unpack_latents(latents, config.height, config.width), tiling_config=model.tiling_config)
+    return ImageUtil.to_pil(decoded)
 
 def gen(name, style):
     from mflux.models.z_image.variants.controlnet.control_types import ControlSpec, ControlType
@@ -379,15 +542,24 @@ def gen(name, style):
     pw, ph = (int(v) for v in os.environ.get("WORLD_PAINT", f"{B.W}x{B.H}").split("x"))
     chain = os.environ.get("WORLD_CHAIN", "1") != "0"
     steps = 6 if RING <= 8 else 8                                  # the quick level trades a little detail for time
+    views = painted()
     meta_path, meta = f"{D}/{name}/views.json", {"views": RING, "painted": N, "room": [RW, RH, RD], "paint": [pw, ph], "style": style, "chain": chain, "file": CN_FILE}
     # views painted against boxes, or against other shapes, are stale; a world without shapes keeps the meta it always had
     if SHAPES: meta["shapes"] = {"meshes": SHAPE_SUMS, "looks": {str(oi): l for oi, l in LOOKS.items()}}
     if OUT: meta.update(setting="outdoor", margin=MARGIN, surround=SURROUND)     # likewise only when outdoor
     if NEW: meta["rules"] = 2                                                   # likewise: the cameras stand elsewhere
-    if not os.path.exists(meta_path) or json.load(open(meta_path)) != meta:   # anything painted for another setup is stale
-        for f in os.listdir(out): os.remove(f"{out}/{f}")
+    if LOOKDOWN is not None: meta["lookdown"] = LOOKDOWN                        # likewise: the downward views were planned
+    if DETAIL is not None: meta.update(painted=len(views), detail={**DETAIL, "start": START_STEP})   # likewise: views were left out and detail views added
+    try: old = json.load(open(meta_path))
+    except (OSError, ValueError): old = None
+    if old != meta:                                                            # anything painted for another setup is stale...
+        # ...but a usual view's picture does not depend on the plan: painted to another plan, only the detail pictures go
+        usual = lambda m: isinstance(m, dict) and {k: v for k, v in m.items() if k not in ("painted", "detail")}
+        for f in os.listdir(out):
+            if usual(old) != usual(meta) or not (f[:2].isdigit() and int(f[:2]) < N): os.remove(f"{out}/{f}")
+        import shutil; shutil.rmtree(f"{D}/{name}/begun", ignore_errors=True)
     json.dump(meta, open(meta_path, "w"))
-    todo = [i for i in range(N) if not os.path.exists(f"{out}/{i:02d}.png")]
+    todo = [i for i in views if not os.path.exists(f"{out}/{i:02d}.png")]
     if not todo: return print("all views already painted")
     speed_patches(); painter_patches()
     model = ZImageTurboControlnet(quantize=8)
@@ -396,16 +568,20 @@ def gen(name, style):
         t, sid, _ = surfaces(i)
         done[i] = (np.asarray(Image.open(f"{out}/{i:02d}.png").convert("RGB").resize((B.W, B.H), Image.LANCZOS), np.float32), t, sid, halo(sid, SLIM))
     if chain:
-        for i in range(N):
+        for i in views:
             if i not in todo: remember(i)
     for i in todo:
         t = time.time()
-        print(f"STAGE: painting view {i + 1} of {N}", flush=True)
+        print(f"STAGE: painting view {views.index(i) + 1} of {len(views)}", flush=True)
         KEEP.clear()
         got = carry_over(i, done) if chain and done else None
         if got: KEEP.update(ref=got[0], mask=got[1])
-        img = model.generate_image(seed=7, prompt=view_prompt(i, style), controlnet_strength=1.0, num_inference_steps=steps, width=pw, height=ph,
-                                   controls=[ControlSpec(type=ControlType.depth, image_path=f"{D}/depth/{i:02d}.png", strength=0.9)])
+        controls = [ControlSpec(type=ControlType.depth, image_path=f"{D}/depth/{i:02d}.png", strength=0.9)]
+        if os.path.exists(f"{D}/{name}/begun/{i:02d}.png"): os.remove(f"{D}/{name}/begun/{i:02d}.png")
+        if got and len(got) > 2 and START_STEP:                  # a detail view: begun from what the ring painted of it
+            os.makedirs(f"{D}/{name}/begun", exist_ok=True); got[3].save(f"{D}/{name}/begun/{i:02d}.png")
+            img = paint_from(model, got[2], min(steps - 1, round(START_STEP * steps / 8)), 7, view_prompt(i, style), controls, steps, pw, ph)
+        else: img = model.generate_image(seed=7, prompt=view_prompt(i, style), controlnet_strength=1.0, num_inference_steps=steps, width=pw, height=ph, controls=controls)
         img.save(f"{out}/{i:02d}.tmp.png"); os.replace(f"{out}/{i:02d}.tmp.png", f"{out}/{i:02d}.png")   # never leave a half-written picture
         if chain: remember(i)
         kept = 100 * np.asarray(got[1]).mean() / 255 if got else 0

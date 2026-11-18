@@ -1,8 +1,10 @@
 """COLMAP-format dataset -> splat PLY + scene.json (poses, up, start view, training focal and width).
-train_scene.py DATASET OUT_PREFIX ITERS [--downscales N] [--res-schedule N] [--sh N] [--eval-every N]
+train_scene.py DATASET OUT_PREFIX ITERS [--downscales N] [--res-schedule N] [--sh N] [--eval-every N] [--render-poses FILE --render-out DIR]
 Flags left out keep msplat's defaults (2 downscales, 3000 steps each, SH degree 3), i.e. the behaviour before the flags existed.
 --eval-every N holds out every Nth photo and prints psnr/ssim/l1. MEASUREMENT ONLY: scene.json then has fewer poses than
-the dataset, which breaks mesh_photos.py's camera-count match, so point OUT_PREFIX at a scratch folder."""
+the dataset, which breaks mesh_photos.py's camera-count match, so point OUT_PREFIX at a scratch folder.
+--render-poses FILE --render-out DIR: after training, also render the cameras listed in FILE (JSON: [{"name", "pose"}],
+pose a 4x4 camera-to-world like scene.json's poses) to DIR/NAME.png, at the training size. Used by evals/."""
 import sys, os, json, struct, time, argparse, numpy as np
 
 def parse(argv):
@@ -14,7 +16,11 @@ def parse(argv):
     p.add_argument("--sh", type=int, choices=(0, 1, 2, 3), help="TrainingConfig.sh_degree")
     p.add_argument("--set", action="append", default=[], metavar="FIELD=VALUE", help="set any other numeric TrainingConfig field, e.g. --set refine_every=100000")
     p.add_argument("--eval-every", type=int, default=0, help="hold out every Nth photo and print the score (measurement only)")
-    return p.parse_args(argv)
+    p.add_argument("--render-poses", metavar="FILE", help="JSON list of {name, pose} to render after training")
+    p.add_argument("--render-out", metavar="DIR", help="folder for those renders, one NAME.png each")
+    a = p.parse_args(argv)
+    if bool(a.render_poses) != bool(a.render_out): p.error("--render-poses and --render-out go together")
+    return a
 
 def camera_use(d):
     """{camera_id: number of photos using it} from COLMAP images.bin (else images.txt) in folder d; {} if unreadable."""
@@ -92,6 +98,11 @@ def main(a):
     for j in (0, n // 2):
         A, B = poses[j], poses[(j + 1) % n]; M = A.copy(); M[:3, 3] = (A[:3, 3] + B[:3, 3]) / 2
         Image.fromarray((np.clip(tr.render_from_pose(M, j), 0, 1) * 255).astype(np.uint8)).save(f"{out}_novel{j}.jpg")
+    if a.render_poses:      # fixed cameras for evals: the same views of every trained variant, so they can be compared
+        os.makedirs(a.render_out, exist_ok=True)
+        for c in json.load(open(a.render_poses)):
+            M = np.array(c["pose"], np.float32).reshape(4, 4)
+            Image.fromarray((np.clip(tr.render_from_pose(M, 0), 0, 1) * 255).astype(np.uint8)).save(os.path.join(a.render_out, c["name"] + ".png"))
     print("splats", tr.splat_count)
     if a.eval_every > 0:
         e = tr.evaluate()

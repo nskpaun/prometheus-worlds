@@ -1,0 +1,18 @@
+[
+ {"name": "cosy-cabin", "layout": "A small log cabin room with a stone fireplace on the back wall, an armchair and a rug in front of it, a bed in one corner and a small table with two chairs by the window",
+  "style": "cosy winter cabin, warm firelight, knitted blankets, rough timber walls, snow outside the window"},
+ {"name": "star-bridge", "layout": "A star destroyer command bridge with a stunning space vista: a long hall with a raised central walkway, sunken crew pits with consoles on both sides, and a wall of tall windows at the front",
+  "style": "cold grey steel military starship interior, glowing control panels, hard polished floor, stars and a planet beyond the windows"},
+ {"name": "mushroom-grotto", "layout": "A round cave chamber with a shallow pool in the middle, giant mushrooms around it, boulders along the walls and a fallen log to sit on",
+  "style": "glowing fungus grotto, wet organic rock, moss, soft blue and green bioluminescent light, hanging roots"},
+ {"name": "walled-garden", "layout": "A walled garden with a fountain in the middle, four flower beds around it, a bench under an apple tree and a greenhouse in one corner", "setting": "outdoor",
+  "style": "English cottage garden on a bright summer morning, old brick walls, roses and lavender, gravel paths"},
+ {"name": "night-street", "layout": "A narrow city street with shop fronts on both sides, a row of street lamps, a parked car, a bus stop with a bench and a food cart at the corner", "setting": "outdoor",
+  "style": "rainy neon-lit Tokyo back street at night, wet asphalt reflections, glowing signs, tangled overhead wires"},
+ {"name": "clock-workshop", "layout": "A clockmaker's workshop with a large pendulum swinging in the middle, a slowly spinning brass orrery on a pedestal, a workbench along one wall and shelves of clocks along another",
+  "style": "Victorian clockmaker's workshop, polished brass and dark walnut, warm gaslight, gears and dials everywhere"},
+ {"name": "sky-lounge", "layout": "A penthouse lounge with one whole wall of floor-to-ceiling windows looking out over a city far below, a long low sofa facing the windows, a coffee table, a grand piano and a bar counter at the back",
+  "style": "luxury modern penthouse at sunset, glass and pale stone, golden light, skyline and mountains beyond the windows"},
+ {"name": "cluttered-attic", "layout": "A cluttered attic packed with stacked trunks and crates, an old wardrobe, a rocking horse, a dressmaker's dummy, piles of books, a rolled carpet, a standing mirror and a small round window at the end",
+  "style": "dusty old attic, shafts of light through the round window, cobwebs, faded wallpaper, worn wood and brass"}
+]

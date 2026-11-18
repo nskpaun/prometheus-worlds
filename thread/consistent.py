@@ -7,13 +7,24 @@ NAME_c without those things, the ground and wall behind them filled in; NAME_c/l
 ring of views around each of those things, so every side of it is trained.
 An outdoor world (C.OUT) also gets NAME_c/sky.json, the colour of its sky.
 A part of an object that no picture shows takes the object's own paint: from its mirror image where it has one, else from
-the nearest painted part. Where a thing was taken out, the floor and wall behind continue the paint around the gap.
+the nearest painted part. Where a thing was taken out, and wherever else no picture shows a floor or wall, it continues
+the paint around the gap with its grain.
+Which picture a point takes its paint from is owner.py's rule (the evals score by the same code); WORLD_GAPS=0 gives the
+rules as they were before the floor round moving things was kept, gaps were given grain and views were added where few look.
+A world painted to a plan (chisel_ring's detail.json) has usual views that were left out, which are training views all
+the same, and detail views, whose paint is laid over the ring's where it is finer (owner.py) after each has been settled
+into the paint it covers (detail.pictures).
 """
-import sys, os, json, glob, shutil, subprocess, numpy as np
-from PIL import Image, ImageFilter
+import sys, os, json, glob, shutil, subprocess
+# one thread for matrix products: on macOS a process whose maths library has started its threads (the first large product
+# does it; settling detail pictures is full of them) leaves the workers forked below hanging in their own
+os.environ.setdefault("VECLIB_MAXIMUM_THREADS", "1")
+import numpy as np
+from PIL import Image
+from scipy import ndimage
 from scipy.spatial.transform import Rotation
 name = sys.argv[1]; sys.argv = [sys.argv[0], "prep"]
-import chisel_ring as C
+import chisel_ring as C, owner as O, detail as DT
 B = C.B; W, H = B.W, B.H
 objs = C.objs
 NS = 6 + len(objs)
@@ -21,43 +32,35 @@ MESH = np.isin(np.arange(NS), [6 + oi for oi in C.SHAPES])       # surfaces that
 OUT = bool(getattr(C, "OUT", False))                             # outdoors: B.ROOM is a far shell, its sides a backdrop, its top sky
 LIFT = sorted({i for i in getattr(C, "LIFT", ()) if 0 <= i < len(objs)})   # objects that move away from their spot
 if os.environ.get("WORLD_LIFT") == "0": LIFT = []                # leave them in the room, where they stay still
-LIFT_HALO = 81                                                   # px, odd: the band around a lifted object that is never taken as room paint
 BARE = None                                                      # set for the second pass: (primitives, their objects) without the lifted ones
-# the floor under and around a lifted object that stands on or just above it holds its painted shadow: (bounds, metres around)
-SHADE = [(lo, hi, float(np.clip(hi[1], 0.4, 2.0))) for lo, hi in (C.bounds(C.OBJ_PRIMS[oi]) for oi in LIFT) if lo[1] < 0.6]
-def shaded(P):
-    """Floor points under and around a lifted object, where the paintings show its shadow rather than the bare floor."""
-    m = np.zeros(P.shape[:-1], bool)
-    for lo, hi, b in SHADE:
-        m |= np.hypot(np.maximum(np.maximum(lo[0] - P[..., 0], P[..., 0] - hi[0]), 0), np.maximum(np.maximum(lo[2] - P[..., 2], P[..., 2] - hi[2]), 0)) < b
-    return m
 
 def trace(cam):
     return B.trace(cam, C.PRIM_OBJ)
 
-OFFS = [(0, 1), (0, -1), (1, 0), (-1, 0), (1, 1), (1, -1), (-1, 1), (-1, -1)]
 src_cams = dict(B.CAMS)
-src = []
-for i in range(C.N):
+SHAPED = [6 + oi for oi in {*C.SHAPES, *(C.SLIM if C.NEW else ())}]      # layouts with "rules" 2: the band round a post is not ground paint either
+NV = C.N + C.ND                                                  # the usual views (some may have been left out), then the detail views
+views, counts = O.Views(), []                                    # per view: what owner.py asks of it (None: not painted), and the pixels of each surface
+views.detail = C.ND
+for i in range(NV):
+    if i in C.SKIP: views.append(None); counts.append(np.zeros(NS, int)); continue
     t, P, sid = trace(src_cams[str(i)])
-    im = Image.open(f"{C.D}/{name}/images/{i:02d}.png").convert("RGB")
-    if im.size != (W, H): im = im.resize((W, H), Image.LANCZOS)      # pictures may be painted smaller than the working size
-    edge = np.zeros((H, W), bool)                                    # source pixels with another surface next to them
-    for dy, dx in OFFS: edge |= sid != np.roll(sid, (dy, dx), (0, 1))
-    src.append((t, np.asarray(im, np.float32), np.bincount(sid.ravel(), minlength=NS), sid, edge, C.halo(sid, C.SLIM if C.NEW else ())))      # layouts with "rules" 2: the band round a post is not ground paint either
-src_lift = []                                                    # per painted view: the lifted objects and the band around their outlines
-for s_ in src if LIFT else ():
-    on_ = np.isin(s_[3], [6 + oi for oi in LIFT])
-    # the objects' own pixels count too: a point just past an outline rounds onto the object, then borrows from its edge
-    src_lift.append(np.asarray(Image.fromarray((on_ * 255).astype(np.uint8)).filter(ImageFilter.MaxFilter(LIFT_HALO))) > 127)
-count = np.stack([s[2] for s in src], 1).astype(float)          # surface x view: pixels of that surface seen
-rank = np.argsort(np.argsort(-count, axis=1), axis=1).astype(float)  # 0 = best view for the surface
-rank[count < 400] = 1e6
+    # the band round a shape's outline (as C.halo makes it); the band round the lifted objects: owner.py
+    on = np.isin(sid, SHAPED)
+    band = O.big(on, C.HALO) & ~on                                   # C.halo's band, 80 times quicker (0.6 s a view saved)
+    if i >= C.N: band |= DT.blank(C, f"{C.D}/{name}/images", i)       # a detail picture: nor what it was not begun from paint
+    views.append(O.view(src_cams[str(i)], t, sid, band, LIFT))
+    counts.append(np.bincount(sid.ravel(), minlength=NS) if i < C.N else np.zeros(NS, int))      # a detail view does not compete by rank
+count = np.stack(counts, 1).astype(float)                        # surface x view: pixels of that surface seen
+rank = O.rank(count)                                             # 0 = best view for the surface
+paint = DT.pictures(C, views, rank, f"{C.D}/{name}/images")      # the pictures at the working size, detail pictures settled into the ring's paint
+# the floor round a lifted object that stands on or just above it holds its painted shadow: where, read from the paint
+SHADOW = O.shade(C, views, rank, LIFT, paint) if LIFT else None
 print("owner view per surface:", {(["x0","floor","z0","x1","ceil","z1"] + [o["name"] for o in objs])[s]: int(count[s].argmax()) for s in range(NS)})
 
 # target cameras: the original ring, an inner ring looking outward at two heights, and a ring pitched up at the
 # ceiling and wall tops (plus one at the upper walls in tall rooms). Never straight up: B.basis needs a horizontal part.
-tgt = [src_cams[str(i)] for i in range(C.N)]
+tgt = [src_cams[str(i)] for i in range(NV)]                         # left-out views too: as training views they cost no painting
 c = C.c
 up = ((C.RH, 6, 0.0), (0.6 * C.RH, 6, 0.5)) if C.RH >= 3.2 else ((C.RH, 10, 0.0),)
 rings = [(C.EYE - 0.25, 0.14, 0.55, 0.55, 12, 0.5), (C.EYE + 0.2, 0.225, 0.55, 0.5, 12, 0.5)] + [(C.EYE - 0.3, 0.15, 0.5, y, n, ph) for y, n, ph in up]
@@ -95,78 +98,38 @@ for oi in LIFT:
             elif not (-6 < e[0] < C.RW + 6 and -6 < e[2] < C.RD + 6) or any(B.inside(e, p, 0.25) for p in C.KEEP_OUT): e = None
             if e is None or not C.crowded(e, 0.5): break         # (half a painted view's clearance: these see paint, they do not make it)
         if e is not None and not C.crowded(e, 0.5) and np.hypot(mid[0] - e[0], mid[2] - e[2]) > 0.3: tgt.append((tuple(e), tuple(mid)))
-n_up = 0
+upward = []
 for ri, (h, r, lr, look, n, ph) in enumerate(rings):
     for i in range(n):
         a = 2 * np.pi * (i + ph) / n; off = np.array([np.cos(a) * C.RW, 0, np.sin(a) * C.RD])
         eye = C.free(c + off * r + [0, h, 0])
         if eye is None: continue                                     # no usable position (inside furniture)
-        tgt.append((tuple(eye), tuple(c + off * lr + [0, look, 0]))); n_up += ri >= 2
+        (upward if ri >= 2 else tgt).append((tuple(eye), tuple(c + off * lr + [0, look, 0])))
+# what a walker can come close to and all the views so far leave to two or three of them (the floor a platform in the
+# middle hides from every ring): a few more views of just that, or the splat is thin there and the background shows through
+tgt += O.cover(C, tgt + upward, LIFT)
+n_up = len(upward); tgt += upward                                    # the views that look up come last
 
 S = np.diag([1.0, 1, -1]); f = W / 2 / np.tan(np.radians(B.FOV) / 2)
 wall = np.isin(np.arange(NS), (0, 2, 3, 5))
 
 def render(k):
-    """One target view: for every pixel, the colour from the best painted view that truly sees that surface point."""
+    """One target view: for every pixel, the colour from the best painted view that truly sees that surface point
+    (owner.py holds the rule; evals/density.py scores by the same one)."""
     cam = tgt[k]; full, ids = B.PRIMS, C.PRIM_OBJ
     if BARE: B.PRIMS, ids = BARE                                     # the target is the room without the lifted objects...
-    if MESH.any():
-        t, P, sid, nrm = B.trace(cam, ids, True)
-        on = MESH[sid]; Pm, nm = P[on], nrm[on]
-    else: t, P, sid = B.trace(cam, ids); on = None
-    B.PRIMS = full                                                   # ...but the painted views saw them: B.visible below needs them all
-    best = np.full((H, W), 1e5); col = np.zeros((H, W, 3), np.float32)
-    lost = np.zeros((H, W), bool) if BARE else None                  # points a painted view shows only next to or behind a lifted object
-    # try the painted views most likely to own this picture's surfaces first: once a pixel has its best-ranked source,
-    # lower-ranked views skip it, which is most of the work saved
-    share = np.bincount(sid.ravel(), minlength=NS)
-    for v in np.argsort((np.minimum(rank, C.N) * share[:, None]).sum(0)):
-        st, simg, _, ssid, sedge, shalo = src[v]
-        score = rank[sid, v]
-        if on is not None and on.any():
-            # a picture that sees a curved shape side-on smears it, and its outline rarely matches the shape to the pixel:
-            # such a view is used only where no view sees the point reasonably head-on
-            to = np.array(src_cams[str(v)][0]) - Pm; cos = (to * nm).sum(1) / np.maximum(np.linalg.norm(to, axis=1), 1e-9)
-            score[on] += C.N * (cos < C.GRAZE)
-            # a view behind the surface is no source at all: through a gap or a single-sheet part it would lend the paint of the other side
-            score[on] = np.where(cos <= 0, 1e6, score[on])
-        px, py, dist, z = B.project(src_cams[str(v)], P)
-        xi, yi = np.round(px).astype(int), np.round(py).astype(int)
-        if on is not None:
-            # the band around a shape's outline in a picture often holds the shape's own paint: the wall or floor seen
-            # there is taken from another view where one exists, or the car's outline ends up stamped on the wall behind it
-            score = score + C.N * shalo[np.clip(yi, 0, H - 1), np.clip(xi, 0, W - 1)]
-        if BARE:
-            # next to a lifted object the painting holds its spill, its edge and its shadow: never a surface of the bare room
-            by = src_lift[v][np.clip(yi, 0, H - 1), np.clip(xi, 0, W - 1)]; score = np.where(by, 1e6, score)
-            lost |= by & (z > 0.05) & (xi >= 1) & (xi < W - 1) & (yi >= 1) & (yi < H - 1)
-        want = score < best                                          # only where this view would become the source
-        want &= (z > 0.05) & (xi >= 1) & (xi < W - 1) & (yi >= 1) & (yi < H - 1)
-        xi, yi = np.clip(xi, 0, W - 1), np.clip(yi, 0, H - 1)
-        # room faces away from any silhouette in the source: same surface, depth within a tolerance that grows with distance
-        plain = want & (sid < 6) & ~sedge[yi, xi]
-        ok = plain & (ssid[yi, xi] == sid) & (np.abs(st[yi, xi] - dist) < np.maximum(0.05, 0.01 * dist))
-        # objects and silhouettes: exact shadow ray (comparing against the source's depth at a rounded pixel gave staircase
-        # edges), then take the colour from the nearest source pixel that shows the same surface
-        ex = np.nonzero(want & ~plain)
-        if len(ex[0]):
-            ey, ex_x, s = yi[ex], xi[ex], sid[ex]
-            vis = B.visible(src_cams[str(v)][0], P[ex])
-            miss = vis & (ssid[ey, ex_x] != s)
-            for dy, dx in OFFS:
-                if not miss.any(): break
-                # clip: entries moved by an earlier offset can already sit on the picture's last row or column
-                m = miss & (ssid[np.clip(ey + dy, 0, H - 1), np.clip(ex_x + dx, 0, W - 1)] == s)
-                ey[m] += dy; ex_x[m] += dx; miss &= ~m
-            ok[ex] = vis & ~miss; yi[ex] = ey; xi[ex] = ex_x
-        best = np.where(ok, score, best); col[ok] = simg[yi[ok], xi[ok]]
-    have = best < 1e5
-    if BARE and SHADE: by = (sid == 1) & shaded(P); have &= ~by; lost |= by
-    return k, P.astype(np.float32), sid.astype(np.int16), col.astype(np.uint8), have, lost
+    if MESH.any(): t, P, sid, nrm = B.trace(cam, ids, True)
+    else: (t, P, sid), nrm = B.trace(cam, ids), None
+    B.PRIMS = full                                                   # ...but the painted views saw them: B.visible needs them all
+    # in the bare room a point that a painted view shows only next to or behind a lifted object, or in its shadow, is "lost"
+    own, yi, xi, _, lost = O.owners(C, views, rank, P, sid, nrm, LIFT if BARE else (), SHADOW)
+    col = np.zeros((H, W, 3), np.float32)
+    for v in np.unique(own[own >= 0]):
+        m = own == v; col[m] = paint[v][yi[m], xi[m]]
+    return k, P.astype(np.float32), sid.astype(np.int16), col.astype(np.uint8), own >= 0, lost if BARE else None
 
 # the views are independent, so they are rendered in parallel (forked workers share the painted pictures without copying)
 import multiprocessing as mp
-from scipy import ndimage
 from scipy.spatial import cKDTree
 workers = max(1, min(8, (os.cpu_count() or 4) - 2, len(tgt)))
 def render_all():
@@ -320,6 +283,10 @@ def write(results, out, bare=False):
         # ...and, in the set that keeps a lifted thing, all the ground no picture shows: its own ring of views looks at the
         # ground under and behind it, where the nearest paint is its shadow
         gap = ~painted & (ndimage.binary_dilation(gone) if bare else bool(LIFT) and fc == 1)
+        # ...and every other stretch no picture shows (the floor a platform hides from the whole ring): a blur of the
+        # nearest paint is a patch without grain, which the trainer covers thinly, so that it shows through from close by.
+        # Not the backdrop outdoors, which fades into the sky below
+        if O.GAPS and not (OUT and fc != 1): gap = ~painted
         if gap.any():
             # where a lifted thing stood or hid the face, the gap can be metres wide (the ground behind a car, out to the
             # backdrop): nearest-cell fill would draw the paint at its rim across it in stripes
@@ -407,13 +374,16 @@ if not LIFT: write(render_all(), out)
 else:
     # the same pictures give two sets: one as painted, and one of the room without the things that move away, where the
     # ground and wall they hid are filled in. The trained splat of the first lends those things; the second is the room
-    write(render_all(), f"{C.D}/{name}_m")
+    # WORLD_ROOM_ONLY=1 (evals/refinish.py, which trains the room alone) leaves the set as painted unmade: a third of the time
+    room_only = os.environ.get("WORLD_ROOM_ONLY") == "1"
+    if not room_only: write(render_all(), f"{C.D}/{name}_m")
     lifted = LIFT
     try:
         keep = [j for j, oi in enumerate(C.PRIM_OBJ) if oi not in LIFT]
         BARE = ([B.PRIMS[j] for j in keep], [C.PRIM_OBJ[j] for j in keep])
         write(render_all(), out, True)
     except Exception as e:      # the moving things then stay where they are: the room is the set as painted
+        if room_only: raise
         print(f"Could not make the room without the moving things ({type(e).__name__}: {e}): they stay still.", flush=True)
         BARE, lifted = None, []
         shutil.rmtree(out, ignore_errors=True); shutil.copytree(f"{C.D}/{name}_m", out)
