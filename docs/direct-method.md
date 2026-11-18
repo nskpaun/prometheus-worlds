@@ -48,6 +48,16 @@ Seen working on trial builds: walking with the collider, the splat, mesh and col
 
 Written into the world's entry the same way as for any invented room, but not yet tried on a direct world: the tour, dropping balls, the sound's mood, the small drifting effects (dust, sparks), sway, and stitching with doorways.
 
+## Exporting for Unreal Engine
+
+**Export for Unreal…** in the viewer, or `pipeline.py export WORLD_DIR NAME`, writes the world's `export/` folder in about 3 to 4 minutes (CPU only, about 10 GB):
+
+- `NAME.glb`: the level to light in Unreal. Each piece is a real mesh: the room's own geometry, every plain-form part and every sculpted thing. Each has its own texture, unwrapped with xatlas and coloured by the same calls the assembler colours its discs with, so the export shows the splat's own materials and paint: 160 texels a metre on the room, 320 on things, 480 on the things the sentence names, at most 4096 a side. Sculpted things get roughness and metal from the paint's material classes (glass, bare metal, gloss). Lamps, fittings and windows glow, and the light's own emitters become glTF lights: lamps as point lights, fittings, fires and screens as spots, the sun as a directional light, in real units.
+- `NAME_baked.glb`: the same meshes and UVs with the splat's traced light baked into unlit textures. It looks like the viewer at once and needs no lights.
+- `README.txt`: the import steps (File > Import Into Level keeps the placement and the lights).
+
+The frame is glTF's: metres, +Y up, the middle of the room's floor at the origin, laid out as the viewer shows it. Checked by importing both files in Blender 5.3 and rendering from the viewer's own test spots; not yet imported into Unreal itself. Worlds built from photos or by the ring method cannot be exported yet: there are no real meshes to export.
+
 ## Known limits
 
 - **Rooms only.** One box-shaped room, 3 to about 16 m across. The architecture kit has no pieces for caves or open ground, which is why outdoor places go to the earlier method.

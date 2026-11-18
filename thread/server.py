@@ -7,6 +7,9 @@
                                         choice; setting: "indoor" or "outdoor" overrides the layout model's own choice)
   POST /api/cancel
   POST /api/stitch                      JSON {name, parts:[{ref, x, z, rot}]}: save several worlds placed side by side as one
+  POST /api/export                      JSON {scene}: export a world built by the direct method as glTF for Unreal Engine
+                                        (a job like a build: its files go to the world's export/ folder)
+  POST /api/reveal                      show the last export's files in the Finder
 One job runs at a time, so only one large model is in memory at once. A cancelled job stays busy ("cancelling": true in
 /api/status, with "state" still "running" so older viewers keep polling) until its processes have really gone.
 WORLDS_ROOT names a folder that holds worlds/ and scenes.json instead of this one: /worlds/... and /scenes.json are then
@@ -34,7 +37,7 @@ def halt(p, rec):
 def run_job(args, rec, env):
     """rec is this run's own record: a later job replaces the global `job`, and must not be written to from here."""
     global proc
-    log = os.path.join(WORLDS, rec["id"], "job.log"); os.makedirs(os.path.dirname(log), exist_ok=True)
+    log = os.path.join(WORLDS, rec["id"], rec.get("logname", "job.log")); os.makedirs(os.path.dirname(log), exist_ok=True)
     rec.update(stage="starting", started=time.time(), error=None, log=[])
     code, last, p = 1, "", None
     try:
@@ -114,6 +117,25 @@ class H(SimpleHTTPRequestHandler):
                 scenes.append({"name": name, "kind": "stitched", "parts": parts, "note": f"{len(parts)} worlds stitched"})
                 json.dump(scenes, open(path + ".tmp", "w"), indent=1); os.replace(path + ".tmp", path)
             return self.send_json({"ok": True, "name": name})
+        if u.path == "/api/export":
+            body = json.loads(self.rfile.read(n) or b"{}")
+            with lock:
+                if job["state"] == "cancelling": return self.send_json({"error": "The last job is still stopping. Try again in a moment."}, 409)
+                if job["state"] == "running" or proc: return self.send_json({"error": "A world is being built or exported: wait for it to finish"}, 409)
+                s = next((s for s in json.load(open(SCENES)) if s["name"] == body.get("scene")), None)
+                if not s: return self.send_json({"error": "No such world"}, 404)
+                if s.get("method") != "direct": return self.send_json({"error": "Only worlds built from a sentence by the newer method can be exported for Unreal"}, 400)
+                jid = s["ply"].strip("/").split("/")[1]; d = os.path.join(WORLDS, jid)
+                if not re.fullmatch(r"[A-Za-z0-9_-]+", jid) or not os.path.isfile(os.path.join(d, "build.json")): return self.send_json({"error": "This world's files are missing"}, 400)
+                job = {"state": "running", "id": jid, "name": s["name"], "type": "export", "logname": "export.log"}
+                threading.Thread(target=run_job, args=(["export", d, s["name"]], job, dict(os.environ)), daemon=True).start()
+            return self.send_json({"ok": True, "id": jid, "name": s["name"]})
+        if u.path == "/api/reveal":
+            j = dict(job); d = os.path.join(WORLDS, j.get("id", ""), "export")
+            if j.get("type") != "export" or j.get("state") != "done" or not os.path.isdir(d): return self.send_json({"error": "Nothing exported yet"}, 400)
+            files = sorted(f for f in os.listdir(d) if f.endswith(".glb"))
+            subprocess.run(["open", "-R", os.path.join(d, files[0])] if files else ["open", d], check=False)
+            return self.send_json({"ok": True, "path": d})
         if u.path == "/api/jobs":
             body = json.loads(self.rfile.read(n) or b"{}")
             with lock:

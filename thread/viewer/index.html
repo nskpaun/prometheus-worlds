@@ -42,6 +42,7 @@ dialog textarea{min-height:64px;resize:vertical} .row{display:flex;justify-conte
   <input type="range" id="volume" min="0" max="1" step="0.05" value="0.6" aria-label="Sound volume" title="Volume">
   <button id="new" class="primary">New world…</button>
   <button id="stitch">Stitch worlds…</button>
+  <button id="export" title="Save this world's geometry, textures and lights as glTF files that Unreal Engine imports">Export for Unreal…</button>
 </div>
 <div id="stitchBar" hidden>
   <b>Stitch worlds</b>
@@ -54,7 +55,7 @@ dialog textarea{min-height:64px;resize:vertical} .row{display:flex;justify-conte
   <button id="stitchCancel">Cancel</button>
   <small id="stitchHint"></small>
 </div>
-<div id="job" role="status"><b id="jobTitle"></b><span id="jobStage"></span><small id="jobLog"></small><button id="jobCancel">Cancel</button></div>
+<div id="job" role="status"><b id="jobTitle"></b><span id="jobStage"></span><small id="jobLog"></small><button id="jobCancel">Cancel</button><button id="jobReveal" hidden>Show in Finder</button></div>
 <dialog id="dlg">
   <h2>New world</h2>
   <div class="tabs" role="tablist">

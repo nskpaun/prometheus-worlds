@@ -529,10 +529,12 @@ async function refreshScenes(select) {
   $("#stitch").disabled = defs.filter((d) => !d.parts).length < 2;
   sel.replaceChildren(...defs.map((d) => new Option(d.name, d.name)));
   if (!defs.length) { status("No worlds yet. Choose New world to build one from photos or a prompt."); return null; }
-  sel.value = defs.find((d) => d.name === keep)?.name ?? defs[0].name;
+  sel.value = defs.find((d) => d.name === keep)?.name ?? defs[0].name; setExport();
   return defs.find((d) => d.name === sel.value);
 }
-$("#scene").addEventListener("change", (e) => load(defs.find((d) => d.name === e.target.value)));
+const exportable = () => defs.find((d) => d.name === $("#scene").value)?.method === "direct";     // the export reads the direct method's own files
+function setExport() { const b = $("#export"); b.disabled = !exportable(); b.title = b.disabled ? "Only worlds built from a sentence by the newer method can be exported for Unreal yet" : "Save this world's geometry, textures and lights as glTF files that Unreal Engine imports"; }
+$("#scene").addEventListener("change", (e) => { setExport(); load(defs.find((d) => d.name === e.target.value)); });
 const asked = new URLSearchParams(location.search);     // ?scene=Name opens that world, &tour=1 starts the tour: a link that shows a world hands-free
 if (asked.get("tour") === "1") $("#tour").checked = true;
 await load(await refreshScenes(asked.get("scene")));
@@ -562,6 +564,12 @@ $("#dlgGo").addEventListener("click", async () => {
   go.disabled = false;
 });
 $("#jobCancel").addEventListener("click", () => post("/api/cancel", {}));
+$("#export").addEventListener("click", async () => {
+  const b = $("#export"); b.disabled = true;
+  try { await post("/api/export", { scene: $("#scene").value }); poll(); }
+  catch (e) { const box = $("#job"); box.style.display = "block"; $("#jobTitle").textContent = "Could not export"; $("#jobStage").textContent = e.message; $("#jobLog").textContent = ""; $("#jobReveal").hidden = true; setExport(); }
+});
+$("#jobReveal").addEventListener("click", () => post("/api/reveal", {}).catch((e) => { $("#jobStage").textContent = e.message; }));
 
 // ---- Stitch editor: drag worlds around from above, place them side by side, save as one bigger world
 const mover = new TransformControls(camera, renderer.domElement);
@@ -664,11 +672,18 @@ async function poll() {
   for (;;) {
     let j; try { j = await (await fetch("/api/status", { cache: "no-store" })).json(); } catch { break; }   // plain file server: no jobs
     const box = $("#job"), mins = `${Math.floor(j.elapsed / 60)}:${String(j.elapsed % 60).padStart(2, "0")}`;
+    const ex = j.type === "export";
     if (j.state === "running") { watched = true;
-      box.style.display = "block"; $("#jobCancel").hidden = false; $("#new").disabled = true;
-      $("#jobTitle").textContent = `Building “${j.name}”`; $("#jobStage").textContent = `${j.stage} · ${mins}`; $("#jobLog").textContent = (j.log ?? []).at(-1) ?? "";
+      box.style.display = "block"; $("#jobCancel").hidden = false; $("#jobReveal").hidden = true; $("#new").disabled = true; $("#export").disabled = true;
+      $("#jobTitle").textContent = ex ? `Exporting “${j.name}” for Unreal` : `Building “${j.name}”`; $("#jobStage").textContent = `${j.stage} · ${mins}`; $("#jobLog").textContent = (j.log ?? []).at(-1) ?? "";
     } else {
-      $("#new").disabled = false; $("#jobCancel").hidden = true;
+      $("#new").disabled = false; $("#jobCancel").hidden = true; setExport();
+      if (ex) {          // an export changes no world: say where its files are, and stay on the world shown
+        if (j.state === "done" && watched) { box.style.display = "block"; $("#jobTitle").textContent = `“${j.name}” exported for Unreal`; $("#jobStage").textContent = `took ${mins} · see README.txt beside the files`; $("#jobLog").textContent = ""; $("#jobReveal").hidden = false; }
+        else if (j.state === "failed") { box.style.display = "block"; $("#jobTitle").textContent = `“${j.name}” could not be exported`; $("#jobStage").textContent = j.error ?? ""; $("#jobLog").textContent = ""; }
+        else if (j.state === "cancelled") { box.style.display = "block"; $("#jobTitle").textContent = `Export of “${j.name}” cancelled`; $("#jobStage").textContent = ""; $("#jobLog").textContent = ""; }
+        break;
+      }
       if (j.state === "done" && announced !== j.id && !watched) announced = j.id;   // finished before this page opened: do not jump to it
       if (j.state === "done" && announced !== j.id) { announced = j.id; box.style.display = "block"; $("#jobTitle").textContent = `“${j.name}” is ready`; $("#jobStage").textContent = `took ${mins}`; $("#jobLog").textContent = ""; await load(await refreshScenes(j.name)); }
       else if (j.state === "failed") { box.style.display = "block"; $("#jobTitle").textContent = `“${j.name}” could not be built`; $("#jobStage").textContent = j.error ?? ""; $("#jobLog").textContent = ""; }

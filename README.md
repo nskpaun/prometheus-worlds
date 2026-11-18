@@ -24,7 +24,7 @@ Prometheus Worlds is an open source world builder. It does four things:
 - **Sentence to world.** Generate a world from a description.
 - **Photos to world.** Rebuild a real room from photos.
 - **Stitching.** Put worlds side by side and walk from one to the next.
-- **Export.** Take a world into a game engine. Godot first.
+- **Export.** Take a world into a game engine. Unreal Engine first, as glTF, which Godot and Blender read too.
 
 A world is four things: **visuals** (what you see from anywhere you stand), **colliders** (what you can't walk through), **sound** (what you hear, and where from) and **motion** (what moves without you).
 
@@ -35,7 +35,7 @@ A world is four things: **visuals** (what you see from anywhere you stand), **co
 | Sentence to world | Indoors: clean geometry and light, object paint rough up close; outdoors rough | Works | Works | Indoors only sway; outdoors works, rigid |
 | Photos to world | Rough, needs 60+ photos | Works, some holes | Missing | Missing |
 | Stitching | Works | Works | Untested | Untested |
-| Export | Missing | Missing | Missing | Missing |
+| Export | Sentence worlds (direct method): geometry, textures and lights as glTF; checked in Blender, not yet in Unreal | Unreal makes them from the meshes | Missing | Missing |
 
 Every "rough" and "missing" is a place to help. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
@@ -90,7 +90,7 @@ Then open `http://127.0.0.1:8765/viewer/index.html`.
 
 In the app, choose **New world…**, then **From your photos** or **From a prompt**. One world is built at a time, and a panel in the corner shows progress. A world from a sentence takes about 20 minutes at Standard detail, longer if the sentence names many large things.
 
-In the viewer: **W A S D** to move, drag to look, **Q** and **E** for down and up, Shift to go faster. Tick **Tour** for a hands-free glide, **Sound** for music and scene sounds, and **Drop balls** to test the colliders. **Stitch worlds…** puts worlds side by side.
+In the viewer: **W A S D** to move, drag to look, **Q** and **E** for down and up, Shift to go faster. Tick **Tour** for a hands-free glide, **Sound** for music and scene sounds, and **Drop balls** to test the colliders. **Stitch worlds…** puts worlds side by side. **Export for Unreal…** saves the world shown as glTF files for Unreal Engine, with a README beside them on how to import them; **Show in Finder** opens their folder when it is done.
 
 ## Models
 
@@ -124,7 +124,7 @@ In short: a sentence becomes a plan of 30 to 45 real things in a room; the room,
 | `app/` | The macOS app: `main.swift`, `Info.plist`, `build.sh`, `make_icon.py` |
 | `thread/server.py` | Local server: static files plus the job API |
 | `thread/pipeline.py` | The pipelines: photos, and a sentence by either method |
-| `thread/build/` | The direct method: layout, shapes, the room's geometry, style guide, materials, object paint, light, the splat writer |
+| `thread/build/` | The direct method: layout, shapes, the room's geometry, style guide, materials, object paint, light, the splat writer, and `export.py`, the Unreal export |
 | `thread/llm_boxes.py` | Earlier method: layout sentence to blockout |
 | `thread/shapes.py` | Real 3D shapes for objects |
 | `thread/chisel_ring.py` | Earlier method: painting views (runs in `spike/.venv`) |

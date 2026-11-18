@@ -221,7 +221,7 @@ def prompt_ring(d, name, layout, style):
 
 # ---------------------------------------------------------------- the direct method (build/)
 BUILD = os.path.join(HERE, "build")
-KEPT = ("layout.json", "layout.raw.json", "boxes.json", "shapes", "materials", "paint", "world.ply", "world_sh.ply", "collider.glb", "scene.json", "build.json", "steps.json")
+KEPT = ("layout.json", "layout.raw.json", "boxes.json", "shapes", "materials", "paint", "world.ply", "world_sh.ply", "collider.glb", "scene.json", "build.json", "steps.json", "export", "export.log")
 
 def world_entry(d, name, sentence, style):
     """The scenes.json entry of a world built by the direct method: what assemble.py wrote, with the files as addresses."""
@@ -290,6 +290,11 @@ def prompt_direct(d, name, sentence, style=""):
     print(f"built in {(time.time() - t00) / 60:.1f} minutes ({rec['total_s'] / 60:.1f} of work over all runs); the largest process held {rec['peak_gb']} GB of memory", flush=True)
     stage("done")
 
+def export(d, name):
+    """A world built by the direct method as glTF files for Unreal Engine (build/export.py) -> WORLD_DIR/export/."""
+    if not os.path.exists(f"{d}/build.json"): raise SystemExit("Only worlds built from a sentence by the direct method can be exported for Unreal yet")
+    run([PY, os.path.join(BUILD, "export.py"), d, f"{d}/export", name], {"PYTHONDONTWRITEBYTECODE": "1"})
+
 def prompt(d, name, sentence, style=""):
     asked = os.environ.get("WORLD_METHOD", "").strip().lower() == "ring"; outdoor = os.environ.get("WORLD_SETTING") == "outdoor"
     if not (asked or outdoor or not has_shapes()): return prompt_direct(d, name, sentence, style)
@@ -299,4 +304,4 @@ def prompt(d, name, sentence, style=""):
     return prompt_ring(d, name, sentence, style or sentence)
 
 if __name__ == "__main__":
-    {"photos": photos, "prompt": prompt}[sys.argv[1]](os.path.abspath(sys.argv[2]), *sys.argv[3:])
+    {"photos": photos, "prompt": prompt, "export": export}[sys.argv[1]](os.path.abspath(sys.argv[2]), *sys.argv[3:])

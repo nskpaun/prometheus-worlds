@@ -1267,6 +1267,9 @@ widgetsnbextension==4.0.16 \
     # via
     #   -c /tmp/c1
     #   ipywidgets
+xatlas==0.0.11 \
+    --hash=sha256:60ed8502af10c980e988bda8bc933b097899f328d61f15c4c5b9a912796493ae
+    # via -r runtime/thread.in
 zipp==4.1.2 \
     --hash=sha256:b30cb6cd253122169c47de245ca24a86bac2a5d3802ba15bf7ba6414eb9e144d \
     --hash=sha256:cf474b90b07ea932637e17c6b9479de2b2882900b0d311bdaf4f5c000a15a97f
