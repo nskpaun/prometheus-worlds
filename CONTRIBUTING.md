@@ -44,7 +44,8 @@ CI runs the same tests plus syntax checks on every pull request. It cannot run t
 - Keep to the style of the file you are in. Most files are compact, with short plain comments.
 - Prefer general fixes over special cases. Do not fix one prompt; fix the reason that prompt failed.
 - A world built before your change should still load and look the same, unless improving it is the point of the change.
-- `thread/chisel_ring.py` runs in `spike/.venv`, which has no scipy, open3d or trimesh. Do not import them there.
+- `thread/chisel_ring.py` runs in `spike/.venv`, which has no scipy, open3d or trimesh. Do not import them there. The same holds for what the direct method runs there: `thread/build/chat.py`, `klein.py`, `klein_paint.py` and the `pictures` step of `sculpt.py`.
+- `thread/build/klein_paint.py` patches mflux 0.24.0 in memory. If you move the mflux pin, check that file (its asserts say what it relies on) and `KLEIN_REV` in `setup.sh`, which must be the revision that mflux loads.
 
 ## Reporting a problem
 

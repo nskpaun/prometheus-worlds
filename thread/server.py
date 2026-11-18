@@ -3,17 +3,22 @@
   GET  /api/status                      current or last job
   POST /api/upload?job=ID&name=FILE     raw photo bytes (call once per photo, before starting a photos job)
   POST /api/jobs                        JSON {type:"photos", id, name} or {type:"prompt", name, layout, style, views, setting}
-                                        (setting: "indoor" or "outdoor" overrides the layout model's own choice)
+                                        (layout: the sentence; style: optional, except for the ring method; views: the Detail
+                                        choice; setting: "indoor" or "outdoor" overrides the layout model's own choice)
   POST /api/cancel
   POST /api/stitch                      JSON {name, parts:[{ref, x, z, rot}]}: save several worlds placed side by side as one
 One job runs at a time, so only one large model is in memory at once. A cancelled job stays busy ("cancelling": true in
 /api/status, with "state" still "running" so older viewers keep polling) until its processes have really gone.
+WORLDS_ROOT names a folder that holds worlds/ and scenes.json instead of this one: /worlds/... and /scenes.json are then
+served from there and new worlds are built there, so trials cannot touch the worlds already made. The viewer and
+everything else is still served from here.
 """
 import sys, os, json, re, time, threading, subprocess, signal, secrets
 from http.server import ThreadingHTTPServer, SimpleHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
 HERE = os.path.dirname(os.path.abspath(__file__))
-WORLDS = os.path.join(HERE, "worlds")
+ROOT = os.path.abspath(os.environ.get("WORLDS_ROOT") or HERE)
+WORLDS = os.path.join(ROOT, "worlds"); SCENES = os.path.join(ROOT, "scenes.json")
 job = {"state": "idle"}; proc = None; lock = threading.Lock()
 slug = lambda s: re.sub(r"[^a-z0-9]+", "-", s.lower()).strip("-")[:40] or "world"
 
@@ -54,6 +59,9 @@ class H(SimpleHTTPRequestHandler):
     extensions_map = {**SimpleHTTPRequestHandler.extensions_map, ".mjs": "text/javascript", ".js": "text/javascript", ".wasm": "application/wasm", ".glb": "model/gltf-binary"}
     def __init__(self, *a, **k): super().__init__(*a, directory=HERE, **k)
     def log_message(self, *a): pass
+    def translate_path(self, path):          # the worlds and their list live under ROOT, which need not be this folder
+        p = super().translate_path(path); rel = os.path.relpath(p, HERE)
+        return os.path.join(ROOT, rel) if ROOT != HERE and (rel == "scenes.json" or rel.split(os.sep)[0] == "worlds") else p
     def end_headers(self):
         if self.path.split("?")[0].endswith((".json", ".html", ".js")): self.send_header("Cache-Control", "no-store")
         super().end_headers()
@@ -94,7 +102,7 @@ class H(SimpleHTTPRequestHandler):
                     if p: halt(p, job)
             return self.send_json({"ok": True})
         if u.path == "/api/stitch":
-            body = json.loads(self.rfile.read(n) or b"{}"); path = os.path.join(HERE, "scenes.json")
+            body = json.loads(self.rfile.read(n) or b"{}"); path = SCENES
             with lock:
                 scenes = json.load(open(path)); single = {s["name"] for s in scenes if "parts" not in s}
                 parts = [{"ref": p["ref"], "x": float(p["x"]), "z": float(p["z"]), "rot": float(p["rot"])} for p in body.get("parts", []) if p.get("ref") in single]
@@ -112,15 +120,17 @@ class H(SimpleHTTPRequestHandler):
                 if job["state"] == "cancelling": return self.send_json({"error": "The last world is still stopping. Try again in a moment."}, 409)
                 if job["state"] == "running" or proc: return self.send_json({"error": "A world is already being built"}, 409)
                 name = (body.get("name") or "").strip()[:60] or "Untitled world"
-                existing = {s["name"] for s in json.load(open(os.path.join(HERE, "scenes.json")))}
+                existing = {s["name"] for s in json.load(open(SCENES))}
                 base, k = name, 2
                 while name in existing: name, k = f"{base} {k}", k + 1
                 env = dict(os.environ)
                 if body.get("type") == "photos":
                     jid = slug(body["id"]); args = ["photos", os.path.join(WORLDS, jid), name]
                 elif body.get("type") == "prompt":
-                    if not body.get("layout", "").strip() or not body.get("style", "").strip(): return self.send_json({"error": "Describe both the layout and the style"}, 400)
-                    jid = f"{slug(name)}-{secrets.token_hex(3)}"; args = ["prompt", os.path.join(WORLDS, jid), name, body["layout"].strip()[:600], body["style"].strip()[:600]]
+                    layout, style = (body.get("layout") or "").strip()[:600], (body.get("style") or "").strip()[:600]
+                    if not layout: return self.send_json({"error": "Describe the place"}, 400)
+                    if not style and env.get("WORLD_METHOD", "").strip().lower() == "ring": return self.send_json({"error": "Describe both the layout and the style"}, 400)
+                    jid = f"{slug(name)}-{secrets.token_hex(3)}"; args = ["prompt", os.path.join(WORLDS, jid), name, layout] + ([style] if style else [])
                     env["WORLD_VIEWS"] = str(max(8, min(16, int(body.get("views", 12)))))
                     if body.get("setting") in ("indoor", "outdoor"): env["WORLD_SETTING"] = body["setting"]
                     else: env.pop("WORLD_SETTING", None)             # anything else leaves the choice to the layout model
@@ -131,7 +141,8 @@ class H(SimpleHTTPRequestHandler):
         self.send_error(404)
 
 if __name__ == "__main__":
-    if not os.path.exists(os.path.join(HERE, "scenes.json")): json.dump([], open(os.path.join(HERE, "scenes.json"), "w"))
+    os.makedirs(WORLDS, exist_ok=True)
+    if not os.path.exists(SCENES): json.dump([], open(SCENES, "w"))
     srv = ThreadingHTTPServer(("127.0.0.1", int(sys.argv[1])), H)
     def stop(*_):
         if proc: kill(proc)

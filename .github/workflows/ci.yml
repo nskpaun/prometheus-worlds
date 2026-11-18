@@ -17,7 +17,7 @@ jobs:
       - name: Install test dependencies
         run: "pip install --require-hashes --only-binary :all: -r runtime/thread.lock"
       - name: Python syntax
-        run: python -m py_compile thread/*.py spike/*.py
+        run: python -m py_compile thread/*.py thread/build/*.py spike/*.py
       - name: Viewer syntax
         run: for f in thread/viewer/*.js; do node --check "$f"; done
       - name: Unit tests

@@ -115,9 +115,11 @@ function geometryFrom(tris, grey = 0.62) {
 async function loadPart(def) {
   const outer = new THREE.Group(), inner = new THREE.Group(); outer.add(inner); scene.add(outer);
   const splat = new SplatMesh({ url: def.ply }); inner.add(splat);
+  // a directly written world keeps its glossy discs, with the harmonics that make their shine move with the eye, in a second file: only they pay for harmonics
+  const splat2 = def.ply2 ? new SplatMesh({ url: def.ply2 }) : null; if (splat2) inner.add(splat2);
   let vis, col;
   try { [vis, col] = await Promise.all([gltf.loadAsync(def.mesh), gltf.loadAsync(def.collider)]); }
-  catch (e) { scene.remove(outer); splat.dispose(); throw e; }
+  catch (e) { scene.remove(outer); splat.dispose(); splat2?.dispose(); throw e; }
   let visGeo = vis.scene.getObjectByProperty("isMesh", true).geometry, colGeo = col.scene.getObjectByProperty("isMesh", true).geometry;
   const q = new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(...def.up).normalize(), new THREE.Vector3(0, 1, 0));
   const pos = colGeo.attributes.position, v = new THREE.Vector3(), xs = [], ys = [], zs = [];
@@ -136,7 +138,7 @@ async function loadPart(def) {
   const roomW = isRoom ? (def.room?.[0] ?? 4) : (pct(xs, hi) - pct(xs, lo)) / metre, roomD = isRoom ? (def.room?.[2] ?? 4) : (pct(zs, hi) - pct(zs, lo)) / metre;
   if (isRoom) { visGeo = colGeo = geometryFrom(tessellate(colGeo, (open ? 1 : roomW * roomD > 60 ? 0.5 : 0.25) * metre)); }
   else visGeo.computeVertexNormals();
-  return { def, outer, inner, splat, visGeo, colGeo, isRoom, open, roomW, roomD, metre };
+  return { def, outer, inner, splat, splat2, visGeo, colGeo, isRoom, open, roomW, roomD, metre };
 }
 
 // Meshes for a part: flat view, collider wireframe, and the night-mode pair (depth prepass + lit pass multiplied over the splat).
@@ -242,7 +244,7 @@ function eraseBox(centre, yaw, halfX, halfY, halfZ, softEdge = 0.03) {     // hi
 // Take a part out of the scene and release its splat data, geometries (visGeo and colGeo can be the same one) and materials.
 function disposePart(p) {
   disposeMotion(p);
-  scene.remove(p.outer); p.splat.dispose();
+  scene.remove(p.outer); p.splat.dispose(); p.splat2?.dispose();
   for (const g of new Set([p.visGeo, p.colGeo])) g.dispose();
   for (const k of ["flat", "wire", "pre", "lit", "outline"]) p[k]?.material.dispose();
   p.outline?.geometry.dispose();
@@ -310,7 +312,7 @@ async function load(def) {
   orbit.target.copy(c).addScaledVector(f, 1.2); orbit.update();
   lamp.position.copy(c).addScaledVector(f, 0.7).add(new THREE.Vector3(0.25, 0.15, 0));
   lamp.intensity = def.lamp ?? (def.parts ? 5 : 1.6);
-  try { await Promise.all(parts.map((p) => p.splat.initialized)); }
+  try { await Promise.all(parts.flatMap((p) => [p.splat.initialized, p.splat2?.initialized])); }
   catch (e) { if (my === loadSeq) { clearWorld(); status(`${def.name} could not be loaded`); console.error(e); } return; }
   if (my !== loadSeq) return;               // a newer load has already cleared this world
   // moving things and sound. Both are optional extras: a failure here leaves a still, silent world
@@ -336,7 +338,7 @@ function apply() {
   if (!S.world) return;
   const mode = document.querySelector("input[name=mode]:checked").value, night = $("#night").checked;
   for (const p of S.parts) {
-    p.splat.visible = mode === "splat"; p.flat.visible = mode === "mesh" && !night; p.wire.visible = mode === "collider";
+    p.splat.visible = mode === "splat"; if (p.splat2) p.splat2.visible = mode === "splat"; p.flat.visible = mode === "mesh" && !night; p.wire.visible = mode === "collider";
     p.lit.material.vertexColors = mode === "mesh"; p.lit.material.blending = mode === "mesh" ? THREE.NormalBlending : THREE.CustomBlending; p.lit.material.needsUpdate = true;
     p.pre.visible = p.lit.visible = night && mode !== "collider";
     setMotionVisible(p, mode, night);

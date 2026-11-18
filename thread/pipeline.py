@@ -1,29 +1,77 @@
 """End-to-end pipelines, run from this folder.
-  pipeline.py photos WORLD_DIR "Name"                    WORLD_DIR/raw/* photos -> splat + mesh + collider
-  pipeline.py prompt WORLD_DIR "Name" "LAYOUT" "STYLE"   sentence + style -> blockout -> pictures -> splat
+  pipeline.py photos WORLD_DIR "Name"                     WORLD_DIR/raw/* photos -> splat + mesh + collider
+  pipeline.py prompt WORLD_DIR "Name" "SENTENCE" ["STYLE"]   a sentence -> a world
 Each step prints a 'STAGE: ...' line. On success the world is added to scenes.json.
-A prompt build is held to WORLD_MINUTES (default 20; 0 for no limit): painting is nearly all of it, so once the layout
+A sentence is built by the direct method (build/, see docs/direct-method.md): a rich layout, real geometry for the room,
+materials and object paint from a style guide, traced light, and the splat written straight from all of it. Its Standard
+build takes about 20 minutes; Full spends more on shapes and paint. Running it again on the same folder goes on where it
+stopped. Switches (environment):
+  WORLD_METHOD=ring     the earlier method instead: boxes painted from a ring of views, then a trained splat (it needs a
+                        STYLE). An outdoor place is always built that way: the direct method only builds rooms yet.
+  WORLD_VIEWS           the app's Detail choice: 16 and over is Full, anything else Standard (ring method: how many views)
+  WORLDS_ROOT           a folder that holds worlds/ and scenes.json, instead of this one (for trials that must not touch
+                        the worlds already made; server.py reads it too)
+The ring method is held to WORLD_MINUTES (default 20; 0 for no limit): painting is nearly all of it, so once the layout
 and the shapes are made, the time that is left decides how many pictures are painted (paint_views).
 """
-import sys, os, re, json, subprocess, shutil, glob, socket, time, hashlib
+import sys, os, re, json, subprocess, shutil, glob, socket, time, hashlib, resource, threading, ctypes
 HERE = os.path.dirname(os.path.abspath(__file__))
+ROOT = os.path.abspath(os.environ.get("WORLDS_ROOT") or HERE)          # holds worlds/ and scenes.json; the server serves both from here
 PY = os.path.join(HERE, ".venv/bin/python")                 # splat training, meshing
 PY_IMG = os.path.join(HERE, "../spike/.venv/bin/python")    # image and depth models (mflux)
 
 def stage(t): print("STAGE: " + t, flush=True)
-def run(cmd, env=None, quiet=False, soft=False):      # soft: a failure is reported and the pipeline carries on
-    r = subprocess.run(cmd, cwd=HERE, env={**os.environ, **(env or {})}, stdout=subprocess.DEVNULL if quiet else None, stderr=subprocess.STDOUT if not quiet else subprocess.DEVNULL)
+def run(cmd, env=None, quiet=False, soft=False, watch=None):      # soft: a failure is reported and the pipeline carries on
+    r = subprocess.Popen(cmd, cwd=HERE, env={**os.environ, **(env or {})}, stdout=subprocess.DEVNULL if quiet else None, stderr=subprocess.STDOUT if not quiet else subprocess.DEVNULL)
+    if watch: watch.follow(r)
+    r.wait()
     if r.returncode and soft: print(f"Skipped a step that failed: {' '.join(map(str, cmd[:3]))}", flush=True)
     elif r.returncode: raise SystemExit(f"Step failed: {' '.join(map(str, cmd[:3]))}")
     return not r.returncode
 
+class Memory:
+    """The most memory any one process under a step held, as macOS counts it against the machine (its footprint, which
+    includes what the GPU holds for it: a picture model's resident size is about half of that). Read from the system's
+    own record of each process's highest footprint, every 2 s while the step runs, for the step's process and all below it."""
+    def __init__(self):
+        self.peak = 0
+        try: self.lib = ctypes.CDLL("/usr/lib/libproc.dylib")
+        except OSError: self.lib = None
+    def of(self, pid):
+        buf = (ctypes.c_uint64 * 64)()                    # rusage_info_v4: a 16-byte id, then 64-bit counters; the 29th is the highest footprint so far
+        return buf[2 + 28] if self.lib and self.lib.proc_pid_rusage(int(pid), 4, ctypes.byref(buf)) == 0 else 0
+    def look(self, top):
+        try: rows = [l.split() for l in subprocess.run(["ps", "-axo", "pid=,ppid="], capture_output=True, text=True, timeout=10).stdout.splitlines()]
+        except (OSError, subprocess.SubprocessError): rows = []
+        kids = {}
+        for a in rows:
+            if len(a) == 2: kids.setdefault(a[1], []).append(a[0])
+        todo = [str(top)]
+        while todo:
+            q = todo.pop(); self.peak = max(self.peak, self.of(q)); todo += kids.get(q, [])
+    def follow(self, proc):
+        def loop():
+            while proc.poll() is None: self.look(proc.pid); time.sleep(2)
+        if self.lib: threading.Thread(target=loop, daemon=True).start()
+    def gb(self):
+        """The step's peak in GB; without the system's record, the largest resident size of any process so far."""
+        return round((self.peak or resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss) / 2**30, 1)
+
+def url(d):
+    """A world folder's address on the server. It must lie under ROOT, or the viewer could not fetch its files."""
+    rel = os.path.relpath(d, ROOT)
+    if rel.startswith(".."): raise SystemExit(f"The world folder must be inside {ROOT} (set WORLDS_ROOT to build somewhere else).")
+    return "/" + rel
+
 def register(entry):
-    path = os.path.join(HERE, "scenes.json")
-    scenes = [s for s in json.load(open(path)) if s["name"] != entry["name"]] + [entry]
+    path = os.path.join(ROOT, "scenes.json")
+    try: scenes = json.load(open(path))
+    except OSError: scenes = []
+    scenes = [s for s in scenes if s["name"] != entry["name"]] + [entry]
     json.dump(scenes, open(path + ".tmp", "w"), indent=1); os.replace(path + ".tmp", path)
 
 def photos(d, name):
-    rel = "/" + os.path.relpath(d, HERE)
+    rel = url(d)
     raw = sorted(glob.glob(f"{d}/raw/*"))
     if len(raw) < 8: raise SystemExit(f"Need at least 8 photos, got {len(raw)}")
     stage(f"converting {len(raw)} photos")
@@ -58,7 +106,7 @@ def photos(d, name):
 
 def prompt_entry(d, name, layout, style, room="gen_c"):
     """The scenes.json entry of a world built from a sentence, whose splat and mesh are in the folder `room` of d."""
-    rel = "/" + os.path.relpath(d, HERE) + "/" + room
+    rel = url(d) + "/" + room
     s, m = json.load(open(f"{d}/{room}/{room}_scene.json")), json.load(open(f"{d}/{room}/{room}_metre.json"))
     entry = {"name": name, "ply": f"{rel}/{room}.ply", "mesh": f"{rel}/{room}_mesh.glb", "collider": f"{rel}/{room}_mesh_collider.glb", "up": s["up"], "center": s["center"],
              "eye": s["eye"], "forward": s["forward"], "metre": m["metre"], "room": m["room"], "flat": True, "lamp": 5, "note": f"invented: {layout[:60]}", "kind": "prompt"}
@@ -98,8 +146,9 @@ def paint_views(d, spent, size, steps=8, limit=None):
     after = 16 + 85 + 75 + 10 + (60 + 75 if moving else 0)
     return max(0.0, (limit - spent - after) / paint_seconds(size, steps))
 
-def prompt(d, name, layout, style):
-    os.makedirs(d, exist_ok=True); t0 = time.time()
+def prompt_ring(d, name, layout, style):
+    """The ring-view method: boxes (and a few sculpted shapes) painted from a ring of views, then a trained splat."""
+    os.makedirs(d, exist_ok=True); t0 = time.time(); url(d)
     n_views = int(os.environ.get("WORLD_VIEWS", "12"))
     # the full detail level paints at 1024x768; the others at 768x576, which is about twice as fast per view
     env = {"WORLD_DIR": os.path.relpath(d, HERE), "WORLD_VIEWS": str(n_views),
@@ -169,6 +218,85 @@ def prompt(d, name, layout, style):
     run([PY, "blockout_mesh.py", room], env)
     register(prompt_entry(d, name, layout, style, room))
     stage("done")
+
+# ---------------------------------------------------------------- the direct method (build/)
+BUILD = os.path.join(HERE, "build")
+KEPT = ("layout.json", "layout.raw.json", "boxes.json", "shapes", "materials", "paint", "world.ply", "world_sh.ply", "collider.glb", "scene.json", "build.json", "steps.json")
+
+def world_entry(d, name, sentence, style):
+    """The scenes.json entry of a world built by the direct method: what assemble.py wrote, with the files as addresses."""
+    rel = url(d); s = json.load(open(f"{d}/scene.json"))
+    return {"name": name, **s, **{k: f"{rel}/{s[k]}" for k in ("ply", "ply2", "mesh", "collider") if k in s},
+            "note": f"built: {sentence[:60]}", "kind": "prompt", "style": style or sentence, "method": "direct"}
+
+def has_shapes():
+    hy3d = os.environ.get("HY3D_DIR") or os.path.join(HERE, "../ext/Hunyuan3D-Swift")
+    return os.path.exists(f"{hy3d}/.build/release/hy3d") and os.path.isdir(f"{hy3d}/weights/shape-small")
+
+def prompt_direct(d, name, sentence, style=""):
+    os.makedirs(d, exist_ok=True); url(d); t00 = time.time()
+    quality = "full" if int(os.environ.get("WORLD_VIEWS", "12")) >= 16 else "standard"
+    env = {"WORLD_DIR": d, "WORLD_QUALITY": quality, "PYTHONDONTWRITEBYTECODE": "1"}
+    sys.path.insert(0, BUILD); import where; q = where.QUALITY[quality]
+    # steps.json: what this folder is a build of, and which steps are done. The same sentence, style and quality: go on after
+    # the last finished step. Anything else: the folder's earlier build is cleared away first
+    mine = {"sentence": sentence, "style": style, "quality": quality}
+    def clear(keep=()):
+        for f in KEPT:
+            if f in keep: continue
+            if os.path.isdir(f"{d}/{f}"): shutil.rmtree(f"{d}/{f}")
+            elif os.path.exists(f"{d}/{f}"): os.remove(f"{d}/{f}")
+    try: rec = json.load(open(f"{d}/steps.json"))
+    except (OSError, ValueError): rec = {}
+    if {k: rec.get(k) for k in mine} != mine or not isinstance(rec.get("done"), dict): clear(); rec = {**mine, "done": {}}
+    def save(): json.dump(rec, open(f"{d}/steps.json.tmp", "w"), indent=1); os.replace(f"{d}/steps.json.tmp", f"{d}/steps.json")
+    def step(key, cmd):
+        """One process of the build, skipped if an earlier run finished it. Its seconds and its own peak memory go on record."""
+        if key in rec["done"]: return
+        t = time.time(); mem = Memory(); run(cmd, env, watch=mem)
+        rec["done"][key] = {"s": round(time.time() - t, 1), "peak_gb": mem.gb()}; save()
+    b = lambda f: os.path.join(BUILD, f)
+    save()
+    if rec.get("outdoor"): return prompt_ring(d, name, sentence, style or sentence)       # found to be outdoors on an earlier run
+    stage("planning the world")
+    step("layout", [PY, b("layout.py"), sentence, f"{d}/layout.json"])        # the world-plan model runs in its own process and leaves memory when done
+    step("plan", [PY, b("sculpt.py"), "plan", f"{d}/layout.json", str(q["sculpt_s"])])
+    try: outdoor = json.load(open(f"{d}/boxes.json")).get("setting") == "outdoor"
+    except (OSError, ValueError): outdoor = False
+    if outdoor:         # only when the choice was left to the plan: with Indoors chosen the layout never answers outdoor
+        print("This is an outdoor place, which the direct method cannot build yet: building it with the ring-view method.", flush=True)
+        clear(keep=("steps.json",)); rec.update(outdoor=True, done={}); save()
+        return prompt_ring(d, name, sentence, style or sentence)
+    stage("sculpting the objects")
+    step("pictures", [PY_IMG, b("sculpt.py"), "pictures"])
+    step("meshes", [PY, b("sculpt.py"), "meshes"])
+    step("place", [PY, b("sculpt.py"), "place"])
+    stage("writing the style guide")
+    step("style", [PY, b("style.py"), sentence] + ([style] if style else []))
+    stage("making the materials")
+    step("materials", [PY, b("materials.py"), str(q["swatches"])])
+    stage("painting the objects")
+    step("paint_prep", [PY, b("paint.py"), "prep"])
+    step("paint_ref", [PY, b("paint.py"), "ref"])            # clears earlier answers: never run again once the pictures below exist
+    step("paint_pictures", [PY_IMG, b("klein_paint.py"), f"{d}/paint/jobs.json"])
+    if q["paint_maps"]:
+        step("paint_maps", [PY, b("paint.py"), "maps"])
+        step("paint_map_pictures", [PY_IMG, b("klein.py"), f"{d}/paint/mapjobs.json"])
+    step("paint_bake", [PY, b("paint.py"), "bake"])
+    stage("laying the splat and tracing the light")
+    step("assemble", [PY, b("assemble.py")])
+    register(world_entry(d, name, sentence, style))
+    rec["total_s"] = round(sum(v["s"] for v in rec["done"].values()), 1); rec["peak_gb"] = max(v["peak_gb"] for v in rec["done"].values()); save()
+    print(f"built in {(time.time() - t00) / 60:.1f} minutes ({rec['total_s'] / 60:.1f} of work over all runs); the largest process held {rec['peak_gb']} GB of memory", flush=True)
+    stage("done")
+
+def prompt(d, name, sentence, style=""):
+    asked = os.environ.get("WORLD_METHOD", "").strip().lower() == "ring"; outdoor = os.environ.get("WORLD_SETTING") == "outdoor"
+    if not (asked or outdoor or not has_shapes()): return prompt_direct(d, name, sentence, style)
+    if asked: pass
+    elif outdoor: print("An outdoor place: built with the ring-view method (the direct method only builds rooms yet).", flush=True)
+    else: print("The 3D shape model is not installed (run ./setup.sh to add it): built with the ring-view method, where objects stay painted boxes.", flush=True)
+    return prompt_ring(d, name, sentence, style or sentence)
 
 if __name__ == "__main__":
     {"photos": photos, "prompt": prompt}[sys.argv[1]](os.path.abspath(sys.argv[2]), *sys.argv[3:])

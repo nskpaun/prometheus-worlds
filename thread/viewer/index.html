@@ -67,11 +67,11 @@ dialog textarea{min-height:64px;resize:vertical} .row{display:flex;justify-conte
     <label for="files">Photos (JPG, PNG or HEIC)</label><input type="file" id="files" multiple accept="image/*,.heic,.HEIC">
   </div>
   <div id="panePrompt" hidden>
-    <p>Describe the place and what goes where, then how it should look. It can be a room, a large hall, or somewhere outdoors like a garden, a park or a street. The layout is built from simple solid shapes, so name the big things: furniture, benches, columns, trees, fences. Say what moves, for example trees in the wind, a swing, a car driving past, bees round the flowers, and it will.</p>
-    <label for="layout">Layout</label><textarea id="layout" placeholder="A bedroom: bed on the back wall, desk by the window on the left wall, bookshelf on the right wall, a plant in the back right corner"></textarea>
-    <label for="style">Style</label><textarea id="style" placeholder="a bright Scandinavian bedroom, pale wood, white linen, morning light"></textarea>
+    <p>Describe the place in a sentence or two: what kind of room it is and the things that matter in it, with where they stand if you care. The rest is filled in to suit: more furniture and small things, the walls, windows and doors, materials and light. Say the time of day if it matters. A place outdoors (a garden, a street) is built in an older, simpler way, where the things you name become painted solid shapes and can move.</p>
+    <label for="layout">The place</label><textarea id="layout" placeholder="A wizard's tower study at night: a big desk in the middle with a brass globe on it, tall bookshelves along the back wall, a fireplace on the right wall and an armchair beside it"></textarea>
+    <label for="style">Look (optional)</label><textarea id="style" placeholder="dark oak and old stone, deep blue velvet, candlelight"></textarea>
     <label for="setting">Indoors or outdoors</label><select id="setting"><option value="" selected>Auto: decide from the description</option><option value="indoor">Indoors</option><option value="outdoor">Outdoors</option></select>
-    <label for="views">Detail</label><select id="views"><option value="8">Quick: about 14 minutes</option><option value="12" selected>Standard: about 20 minutes</option><option value="16">Full, larger pictures: about 40 minutes</option></select>
+    <label for="views">Detail</label><select id="views"><option value="12" selected>Standard: about 20 minutes</option><option value="16">Full, finer paint and more sculpted shapes: about 30 minutes (outdoors about 40)</option></select>
   </div>
   <div id="err" role="alert"></div>
   <div class="row"><button id="dlgCancel">Cancel</button><button id="dlgGo" class="primary">Build world</button></div>

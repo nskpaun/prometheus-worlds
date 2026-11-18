@@ -46,9 +46,9 @@ def note_time(kind, what, secs):
         t = times(); t.setdefault(kind, {})[what] = round(float(t.get(kind, {}).get(what, 0)) + secs, 1); save_json(t, f"{S}/times.json")
     except Exception: pass
 
-def give_up(kind, why):
+def give_up(kind, why, then="it stays a box"):
     """This kind stays a box, now and on later runs (until KIND.failed is deleted): trying again costs minutes each time."""
-    print(f"{kind} {why}: it stays a box", flush=True)
+    print(f"{kind} {why}: {then}", flush=True)
     try: open(f"{S}/{kind}.failed", "w").write(why + "\n")
     except OSError: pass
 

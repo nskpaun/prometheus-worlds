@@ -15,7 +15,7 @@ The stitched world keeps a list of its rooms and where each one sits, so it load
 
 ## Moving things, outdoor places and sound
 
-This part is new. One outdoor park (two swaying trees, a swing, bees, falling leaves and a passing car) was built end to end in 26 minutes and checked moving in the viewer; other kinds of scene have only had their layouts checked. Nobody has listened to the sound yet.
+This part describes the earlier, ring-view method, which now builds outdoor places only (and rooms when `WORLD_METHOD=ring` is set). A room built by the direct method keeps its mood, its sound and its drifting effects, but its objects stand still: see [direct-method.md](direct-method.md). One outdoor park (two swaying trees, a swing, bees, falling leaves and a passing car) was built end to end in 26 minutes and checked moving in the viewer; other kinds of scene have only had their layouts checked. Nobody has listened to the sound yet.
 
 Say what moves in the layout sentence, for example "a small park on a breezy day: two big trees at the back, a swing in the middle, bees around a flower bed, and a road along the front where a car drives past". The layout model decides which pieces move and how, from a fixed set of motions:
 
@@ -49,7 +49,11 @@ Limits set in code: at most 40 moving objects per world, of which at most 12 may
 2. msplat trains a Gaussian splat on the Mac's GPU.
 3. Depth Pro estimates depth for each photo. Each depth map is scaled to match COLMAP's 3D points, and all of them are fused into one mesh, coloured from the photos.
 
-**Prompt to world** (`pipeline.py prompt`, roughly 14 to 40 minutes depending on detail)
+**Sentence to world, a room** (`pipeline.py prompt`, about 20 minutes at Standard detail)
+
+A room is built by the direct method, described step by step in [direct-method.md](direct-method.md): the 35B text model plans 30 to 45 real things; the room, plain forms and sculpted shapes are made as geometry; a style guide drives a true-scale material for every surface and paint for every sculpted object; light is traced; the splat is written directly as flat discs, with no training.
+
+**Sentence to world, outdoors or with `WORLD_METHOD=ring`** (the earlier method, roughly 20 to 40 minutes depending on detail)
 
 1. Qwen3.5 9B reads the layout sentence and writes a rough plan: indoor or outdoor, the room's size, plus pieces placed against walls, at points, at the corners, or in rings and arcs. A piece is a box, an upright cylinder, an arch, or a named piece of furniture. The plan may also give a piece a motion, list effects, and set wind and mood. Code checks the plan (everything is kept inside the room and resting on the floor, rows are thinned so copies do not overlap, an audience is turned to face a stage) and expands it into the blockout. For motion, code also clamps every number, lets only a piece with a motion sit above the ground, stands a travelling piece at its first point facing the way it goes, shrinks a swing's angle until its arc clears the ground, and gives each copy in a ring its own phase. `WORLD_SETTING=indoor` or `outdoor` overrules the model's choice. `thread/tests/test_layout.py` checks all of this with canned plans, without the model.
 2. Objects get real 3D shapes (`shapes.py`), so a car is a car and not a painted box. Qwen groups the objects into kinds that can share a shape, says which deserve one (a car or a sofa does; a platform or a plain pillar does not) and describes each. Z-Image Turbo paints one picture of each kind alone on a plain blue backdrop, the backdrop is cut away, and Hunyuan3D turns the cut-out into a mesh. Each mesh is turned to face the way its block faces, scaled to fit the block without stretching, and stood on the floor or on whatever is under it. Up to six kinds are shaped (set `WORLD_SHAPES`; 0 turns this off). Each kind adds about a minute. If the shape model is not installed, or a shape fails, the object stays a box and the build carries on.
@@ -65,7 +69,7 @@ Outdoors, the depth maps given to the painter show the backdrop and sky as pure 
 
 ## Speed notes
 
-Painting views dominates a prompt build. Measured on an M4 Pro: about 57 s per view at 768x576 with 8 steps (about 49 s with the Quick level's 6 steps), down from about 160 s at 1024x768. The gains come from patches applied to mflux in memory (`speed_patches` in `thread/chisel_ring.py`): the control input is kept in the model's 16-bit format so the transformer does not fall back to 32-bit, each distinct prompt is encoded once, and the blockout depth map is used directly. Peak memory while painting is about 18 GB.
+Painting views dominates a prompt build. Measured on an M4 Pro: about 57 s per view at 768x576 with 8 steps (about 49 s with the 6 steps used when `WORLD_VIEWS` is 8; the dialog no longer offers that level), down from about 160 s at 1024x768. The gains come from patches applied to mflux in memory (`speed_patches` in `thread/chisel_ring.py`): the control input is kept in the model's 16-bit format so the transformer does not fall back to 32-bit, each distinct prompt is encoded once, and the blockout depth map is used directly. Peak memory while painting is about 18 GB.
 
 Tried and not adopted: a full-resolution training schedule (2.4 times slower with no gain on a held-out score), the unquantised image model (no faster, 33 GB), and Rapier's internal-edge fix for colliders (it made walls one-sided, so balls rolled out through them).
 
@@ -76,15 +80,17 @@ Tried and not adopted: a full-resolution training schedule (2.4 times slower wit
 
 ## Known limits
 
-- **Large halls are still weak.** In a 12 m garage the floor and ceiling are soft patchwork and objects far from the middle are blurry up close: the pictures are too coarse for that much room.
+The limits of rooms built by the direct method are listed in [direct-method.md](direct-method.md). Those below marked "earlier method" apply to outdoor places and to rooms built with `WORLD_METHOD=ring`.
+
+- **Large halls are still weak** (earlier method)**.** In a 12 m garage the floor and ceiling are soft patchwork and objects far from the middle are blurry up close: the pictures are too coarse for that much room.
 - **Generated shapes are only as good as one picture.** Copies of a kind are identical, the side the picture did not show is guessed, and paint on a shape shows seams where two views meet.
 - **Photo worlds need many more photos than 20 to hold up while moving.** There is no way to invent extra views of a real room; expect good results only near where photos were taken.
 
-- **Objects without a generated shape are painted onto simple shapes**, so they look right from the front and flatter from the side. Some seams remain where surfaces meet.
+- **Objects without a generated shape are painted onto simple shapes** (earlier method), so they look right from the front and flatter from the side. Some seams remain where surfaces meet.
 - **Invented spaces are box-shaped rooms** (or, outdoors, flat rectangular patches of ground) from 3 to 24 m across, filled with boxes, cylinders, a fixed set of furniture blocks and generated shapes. Curved walls, sloped roofs, stairs and tiers are not possible; a tent or dome exists only as painted texture.
 - **The layout model is small and makes spatial mistakes.** Code catches the common ones, but an unusual description can still give an odd arrangement.
 - **Photo meshes have holes** where no photo looked, and their colour is per vertex, so it is blurry. Balls can fall through holes; a flat safety floor catches them.
-- **Invented rooms have a plain ceiling.** It is a flat light colour, not painted.
+- **Invented rooms have a plain ceiling** (earlier method)**.** It is a flat light colour, not painted.
 - **Outdoors is a flat painted surround** about 20 m away, with plain sky above roughly 20°. There are no hills or clouds overhead, and far ground is soft. Outdoor worlds cannot be stitched to rooms yet.
 - **Trees are solid painted shapes.** Clumps of the crown bend in the wind, but sky never shows through leaves and single leaves do not flutter. The falling-leaf effect supplies that impression.
 - **The swing is the weakest part.** The seat is a small painted plank with ropes drawn by the viewer, and the frame is plain posts. The painter may draw its own chains, which then stay on the background.
@@ -102,5 +108,4 @@ Tried and not adopted: a full-resolution training schedule (2.4 times slower wit
 - **Not yet tested with Wi-Fi off.** Nothing calls out after the models are downloaded, but that has not been verified.
 - **Doorways are cut only between invented rooms.** Worlds made from photos can be placed in a stitched world but get no doorway, because their walls are not known exactly.
 - **A doorway cuts through whatever is there**, including furniture standing against that wall.
-- **There is no walking mode yet.** You look around with an orbit camera; moving through a dungeon on foot is not built.
 - No export of relit splats, no texture baking, no flythrough video from the app.

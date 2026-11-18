@@ -128,7 +128,7 @@ def full(label, only=()):
         pipeline.run, pipeline.register, pipeline.stage = run_with_renders, lambda entry: None, lambda t: (marks.append((t, time.time())), print("STAGE: " + t, flush=True))
         t0 = time.time(); rec = {"tier": "full", "label": label, "world": p["name"], "work": work}
         try:      # whatever goes wrong with one sentence, building or scoring, is written down and the next one is built
-            pipeline.prompt(d, p["name"], p["layout"], p["style"])
+            pipeline.prompt_ring(d, p["name"], p["layout"], p["style"])      # this tier scores the ring method's views and trained splat
             rec.update(total_s=round(time.time() - t0, 1), stages_s={a[0]: round(b[1] - a[1], 1) for a, b in zip(marks, marks[1:])})
             mesh = sorted(glob.glob(f"{d}/gen_?/gen_?_mesh.glb"))
             if not mesh or not os.path.isdir(f"{work}/renders"): rec["failed"] = "no mesh or no renders"
