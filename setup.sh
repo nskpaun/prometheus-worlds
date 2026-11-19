@@ -23,6 +23,11 @@ ZIMG_FILES=('vae/*.safetensors' 'vae/*.json' 'transformer/*.safetensors' 'transf
 KLEIN_FILES=('vae/*' 'transformer/*' 'text_encoder/*' 'tokenizer/*' LICENSE.md)                       # what mflux reads; leaves out a second 7.75 GB copy of the transformer
 HY_GIT="https://github.com/ZimengXiong/Hunyuan3D-Swift"; HY_REV="292331f4d26ddb80b9dcea6bcb5629ff82f12b82"
 HY_REPO="zimengxiong/hunyuan3d-mlx-shape-small"; HY_WREV="b7536809d38ad13fe6a9b7769a41fd5d42e520df"
+SHARP_GIT="https://github.com/apple/ml-sharp"; SHARP_REV="aed6527499ef91cba3b54c18d49a870f25947190"      # one photo in, a splat out: what worlds from photos are made of
+SHARP_URL="https://ml-site.cdn-apple.com/models/sharp/sharp_2572gikvuh.pt"; SHARP_SHA="94211a75198c47f61fca7d739ba08a215418d8d398d48fddf023baccc24f073d"
+LG_GIT="https://github.com/cvg/LightGlue"; LG_REV="5a650c444718caffc2669dc0094cde908f42dd73"                 # matches between photos, for the camera solve
+LG_KP_URL="https://github.com/Shiaoming/ALIKED/raw/main/models/aliked-n16.pth"; LG_KP_SHA="5be8704840ed662d9d8c561bf7279c222092674e7eb05fd0feab94899e9d82f2"
+LG_M_URL="https://github.com/cvg/LightGlue/releases/download/v0.1_arxiv/aliked_lightglue.pth"; LG_M_SHA="d975e965b105311a6143194852297dff4f02aea5cc2e10cecfed966ca0e22503"
 MLX_WHL="https://files.pythonhosted.org/packages/38/29/71fe1f68756f515856e6930973c23245810d4aa3cd22fddd719d86a709dc/mlx-0.31.1-cp312-cp312-macosx_14_0_arm64.whl"
 MLX_SHA="8a63b31a398c9519f2bb0c81cf3865d9baca4ff573ffc31ead465d18286184e8"
 
@@ -63,7 +68,7 @@ env_from() {   # VENV LOCK
 }
 step "Packages for the pipelines (numpy, Open3D, COLMAP, the splat trainer)"
 env_from thread/.venv runtime/thread.lock
-step "Packages for the image and layout models (MLX, mflux, mlx-lm)"
+step "Packages for the image, layout and photo models (MLX, mflux, mlx-lm, PyTorch)"
 env_from spike/.venv runtime/paint.lock
 
 hf() { spike/.venv/bin/python -c "import sys; from huggingface_hub import snapshot_download as s; s(sys.argv[1], revision=sys.argv[2], **({'local_dir': sys.argv[3]} if len(sys.argv) > 3 else {}))" "$@"; }
@@ -105,6 +110,26 @@ step "Material and paint model (FLUX.2 Klein 4B, about 16 GB)"
 model $KLEIN_REPO $KLEIN_REV $KLEIN_FILES
 step "Object-picture model (Z-Image Turbo, about 31 GB)"
 model $ZIMG_REPO $ZIMG_REV $ZIMG_FILES
+
+step "Photo-to-splat model (SHARP, about 2.8 GB)"
+( set -e
+  S=ext/ml-sharp
+  if [[ "$(git -C $S rev-parse HEAD 2>/dev/null)" != $SHARP_REV ]]; then
+    rm -rf $S && mkdir -p ext && git clone --quiet $SHARP_GIT $S && git -C $S checkout --quiet $SHARP_REV
+  fi
+  [ -f $S/sharp_2572gikvuh.pt ] || fetch "$SHARP_URL" $S/sharp_2572gikvuh.pt $SHARP_SHA
+) || print "  WARNING: the photo model could not be set up, so worlds cannot be built from photos yet. Run ./setup.sh again to retry."
+
+step "Photo-matching model (ALIKED and LightGlue, about 50 MB)"
+( set -e
+  L=ext/LightGlue
+  if [[ "$(git -C $L rev-parse HEAD 2>/dev/null)" != $LG_REV ]]; then
+    rm -rf $L && mkdir -p ext && git clone --quiet $LG_GIT $L && git -C $L checkout --quiet $LG_REV
+  fi
+  mkdir -p $L/hub/checkpoints      # where the code looks for its weights, under the names it gives them
+  [ -f $L/hub/checkpoints/aliked-n16.pth ] || fetch "$LG_KP_URL" $L/hub/checkpoints/aliked-n16.pth $LG_KP_SHA
+  [ -f $L/hub/checkpoints/aliked_lightglue_v0-1_arxiv.pth ] || fetch "$LG_M_URL" $L/hub/checkpoints/aliked_lightglue_v0-1_arxiv.pth $LG_M_SHA
+) || print "  WARNING: the photo-matching model could not be set up. Photos are matched the earlier way until it is, which places fewer of them. Run ./setup.sh again to retry."
 
 if [[ "$1" != "--no-shapes" ]]; then
   step "3D shape model (Hunyuan3D, about 4 GB)"

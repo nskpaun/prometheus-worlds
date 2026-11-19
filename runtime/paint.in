@@ -1,3 +1,7 @@
 mflux
 mlx-lm==0.32.2
 huggingface-hub
+timm
+plyfile
+scipy
+kornia

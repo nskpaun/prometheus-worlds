@@ -297,6 +297,9 @@ async function load(def) {
     S.bound = { x: out.outer.position.x, z: out.outer.position.z, hx: out.roomW / 2 + 3, hz: out.roomD / 2 + 3, hy: Math.max(3, out.def.room?.[1] ?? 6) }; orbit.maxDistance = 8;
     const c = out.def.sky; S.sky = Array.isArray(c) && c.length === 3 && c.every(Number.isFinite);
     if (S.sky) sky.material.color.setRGB(c[0], c[1], c[2], THREE.SRGBColorSpace);
+  } else if (Array.isArray(def.backdrop) && def.backdrop.length === 3 && def.backdrop.every(Number.isFinite)) {
+    // a world from photos has gaps where no photo looked: behind them a muted tone of the place itself, not black
+    S.sky = true; sky.material.color.setRGB(def.backdrop[0], def.backdrop[1], def.backdrop[2], THREE.SRGBColorSpace);
   }
   else if (S.parts.every((p) => p.isRoom && Array.isArray(p.def.room) && p.def.room.length === 3 && p.def.room.every((v) => v > 0))) {
     // invented rooms: where a walking eye may be. Each room's box, 0.25 m in from walls and ceiling, and a short box through each doorway
@@ -552,7 +555,7 @@ $("#dlgGo").addEventListener("click", async () => {
   try {
     if (tab === "photos") {
       const files = [...$("#files").files];
-      if (files.length < 8) throw new Error("Pick at least 8 photos (20 or more works much better).");
+      if (files.length !== 1 && files.length < 8) throw new Error("Pick one photo, or at least 8 (20 or more works much better).");
       const id = "photos-" + Date.now().toString(36);
       for (const [i, f] of files.entries()) { $("#err").textContent = `Copying photo ${i + 1} of ${files.length}…`; await post(`/api/upload?job=${id}&name=${encodeURIComponent(f.name)}`, f, true); }
       await post("/api/jobs", { type: "photos", id, name: name || "My photos" });

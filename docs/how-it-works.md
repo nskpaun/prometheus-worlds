@@ -43,11 +43,14 @@ Limits set in code: at most 40 moving objects per world, of which at most 12 may
 
 ## How it works
 
-**Photos to world** (`pipeline.py photos`, a few minutes)
+**Photos to world** (`pipeline.py photos`, about 15 minutes for 60 photos, under a minute for one). [photos-method.md](photos-method.md) has the detail.
 
-1. COLMAP solves where each photo was taken.
-2. msplat trains a Gaussian splat on the Mac's GPU.
-3. Depth Pro estimates depth for each photo. Each depth map is scaled to match COLMAP's 3D points, and all of them are fused into one mesh, coloured from the photos.
+1. ALIKED and LightGlue match the photos to each other, and COLMAP solves where each was taken from those matches.
+2. SHARP turns every photo into its own piece of splat, in one pass each. Nothing is trained.
+3. The pieces are placed with the solved cameras, bent onto one agreed surface, matched in colour, and each small cell of space is given to one photo.
+4. The agreed surface becomes the mesh and the collider.
+
+One photo skips steps 1 and 3: its piece is the world. `PHOTOS_METHOD=train` builds the earlier way (COLMAP's SIFT, a splat trained by msplat, a mesh from Depth Pro).
 
 **Sentence to world, a room** (`pipeline.py prompt`, about 20 minutes at Standard detail)
 
@@ -84,7 +87,7 @@ The limits of rooms built by the direct method are listed in [direct-method.md](
 
 - **Large halls are still weak** (earlier method)**.** In a 12 m garage the floor and ceiling are soft patchwork and objects far from the middle are blurry up close: the pictures are too coarse for that much room.
 - **Generated shapes are only as good as one picture.** Copies of a kind are identical, the side the picture did not show is guessed, and paint on a shape shows seams where two views meet.
-- **Photo worlds need many more photos than 20 to hold up while moving.** There is no way to invent extra views of a real room; expect good results only near where photos were taken.
+- **Photo worlds show only what the photos saw.** There is no way to invent extra views of a real room: a place no photo looked at is a hole. Their other limits are in [photos-method.md](photos-method.md).
 
 - **Objects without a generated shape are painted onto simple shapes** (earlier method), so they look right from the front and flatter from the side. Some seams remain where surfaces meet.
 - **Invented spaces are box-shaped rooms** (or, outdoors, flat rectangular patches of ground) from 3 to 24 m across, filled with boxes, cylinders, a fixed set of furniture blocks and generated shapes. Curved walls, sloped roofs, stairs and tiers are not possible; a tent or dome exists only as painted texture.

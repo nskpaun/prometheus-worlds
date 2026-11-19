@@ -71,36 +71,53 @@ def register(entry):
     json.dump(scenes, open(path + ".tmp", "w"), indent=1); os.replace(path + ".tmp", path)
 
 def photos(d, name):
+    """One photo: its SHARP piece is the world. Eight or more: cameras are solved, every photo's piece is placed and the pieces
+    merged (photo_fuse.py). PHOTOS_METHOD=train builds the earlier way instead, by training a splat on the photos."""
     rel = url(d)
-    raw = sorted(glob.glob(f"{d}/raw/*"))
-    if len(raw) < 8: raise SystemExit(f"Need at least 8 photos, got {len(raw)}")
-    stage(f"converting {len(raw)} photos")
+    raw = sorted(glob.glob(f"{d}/raw/*")); one = len(raw) == 1; train = os.environ.get("PHOTOS_METHOD") == "train"
+    if not one and len(raw) < 8: raise SystemExit(f"Pick one photo, or at least 8 (got {len(raw)})")
+    if one and train: raise SystemExit("One photo cannot be trained on: it needs the default method")
+    stage(f"converting {len(raw)} photo" + ("" if one else "s"))
     os.makedirs(f"{d}/images", exist_ok=True)
-    for i, f in enumerate(raw):
-        run(["sips", "-s", "format", "jpeg", "-s", "formatOptions", "92", "-Z", "1920", f, "--out", f"{d}/images/{i:03d}.jpg"], quiet=True)
-    stage("solving camera positions")
-    for p in ("db.db", "sparse", "dense", "txt"):
+    for i, f in enumerate(raw):       # at most 1920 across; a smaller photo keeps its size (sips -Z would enlarge it)
+        side = [int(x) for x in re.findall(r"pixel(?:Width|Height): (\d+)", subprocess.run(["sips", "-g", "pixelWidth", "-g", "pixelHeight", f], capture_output=True, text=True).stdout)]
+        run(["sips", "-s", "format", "jpeg", "-s", "formatOptions", "92"] + (["-Z", "1920"] if not side or max(side) > 1920 else []) + [f, "--out", f"{d}/images/{i:03d}.jpg"], quiet=True)
+    for p in ("db.db", "sparse", "dense", "txt", "pieces", "matches.npz", "pairs.txt"):
         shutil.rmtree(f"{d}/{p}", ignore_errors=True) if os.path.isdir(f"{d}/{p}") else (os.path.exists(f"{d}/{p}") and os.remove(f"{d}/{p}"))
-    run([PY, "sfm.py", "solve", d], quiet=True)      # COLMAP, through pycolmap: features, matching, camera positions, undistorted images
-    os.makedirs(f"{d}/dense/sparse/0")
-    for b in glob.glob(f"{d}/dense/sparse/*.bin"): shutil.move(b, f"{d}/dense/sparse/0/")
-    os.makedirs(f"{d}/txt"); run([PY, "sfm.py", "totxt", f"{d}/dense/sparse/0", f"{d}/txt"], quiet=True)
-    n_reg = len([l for l in open(f"{d}/txt/images.txt") if l[0] != "#"]) // 2
-    print(f"registered {n_reg} of {len(raw)} photos", flush=True)
-    if n_reg < 5: raise SystemExit(f"Only {n_reg} photos could be placed: the photos need more overlap")
-    stage(f"training the splat ({n_reg} photos placed)")
-    run([PY, "train_scene.py", f"{d}/dense", f"{d}/scene", "7000"])
-    shutil.copy(f"{d}/scene_scene.json", f"{d}/scene.json")
-    stage("estimating depth for each photo")
-    run([PY_IMG, "photo_depth.py", f"{d}/dense/images", f"{d}/mono"])
-    stage("building the mesh and collider")
-    run([PY, "mesh_photos.py", d, f"{d}/mesh"])
+    n_reg = 1
+    if not one:
+        stage("solving camera positions")
+        # learned features find matches on plain walls and tiles where SIFT does not; if that step fails, COLMAP's own SIFT is used
+        learned = not train and run([PY_IMG, "photo_match.py", f"{d}/images", f"{d}/matches.npz"], {"PYTHONDONTWRITEBYTECODE": "1"}, soft=True)
+        run([PY, "sfm.py", "solve", d] + ([f"{d}/matches.npz"] if learned else []), quiet=True)      # COLMAP, through pycolmap: camera positions, undistorted images
+        os.makedirs(f"{d}/dense/sparse/0")
+        for b in glob.glob(f"{d}/dense/sparse/*.bin"): shutil.move(b, f"{d}/dense/sparse/0/")
+        os.makedirs(f"{d}/txt"); run([PY, "sfm.py", "totxt", f"{d}/dense/sparse/0", f"{d}/txt"], quiet=True)
+        n_reg = len([l for l in open(f"{d}/txt/images.txt") if l[0] != "#"]) // 2
+        print(f"registered {n_reg} of {len(raw)} photos", flush=True)
+        if n_reg < 5: raise SystemExit(f"Only {n_reg} photos could be placed: the photos need more overlap")
+    if train:
+        stage(f"training the splat ({n_reg} photos placed)")
+        run([PY, "train_scene.py", f"{d}/dense", f"{d}/scene", "7000"])
+        shutil.copy(f"{d}/scene_scene.json", f"{d}/scene.json")
+        stage("estimating depth for each photo")
+        run([PY_IMG, "photo_depth.py", f"{d}/dense/images", f"{d}/mono"])
+        stage("building the mesh and collider")
+        run([PY, "mesh_photos.py", d, f"{d}/mesh"])
+    else:
+        stage("building the scene from the photo" if one else f"building a piece of the scene from each photo ({n_reg} placed)")
+        run([PY_IMG, "photo_pieces.py"] + ([f"{d}/images", f"{d}/pieces"] if one else [f"{d}/dense/images", f"{d}/pieces", "--colmap", f"{d}/txt"]), {"PYTHONDONTWRITEBYTECODE": "1"})
+        if not one: stage("merging the pieces into one scene")
+        run([PY, "photo_fuse.py", d] + (["--one"] if one else []))
+        stage("building the mesh and collider")       # one photo may look well down or up, so its floor may lean far from the camera's up
+        run([PY, "mesh_photos.py", d, f"{d}/mesh", "--surface", f"{d}/surface.ply"] + (["--tilt", "75"] if one else []))
     s = json.load(open(f"{d}/scene.json"))
     entry = {"name": name, "ply": f"{rel}/scene.ply", "mesh": f"{rel}/mesh.glb", "collider": f"{rel}/mesh_collider.glb", "up": s["up"], "center": s["center"],
-             "eye": s["eye"], "forward": s["forward"], "note": f"{n_reg} photos, {s['splats'] // 1000}k splats", "kind": "photos"}
-    entry.update({k: s[k] for k in ("focal", "width") if k in s})
-    # mesh_meta.json also holds estimates of scale, floor and up; they are kept on disk but not used yet, because the
-    # scale disagrees with the viewer's own estimate by about 20% and one real measurement is needed to say which is right
+             "eye": s["eye"], "forward": s["forward"], "note": ("1 photo" if one else f"{n_reg} photos" if n_reg == len(raw) else f"{n_reg} of {len(raw)} photos placed") + f", {s['splats'] // 1000}k splats", "kind": "photos"}
+    entry.update({k: s[k] for k in ("focal", "width", "metre", "backdrop") if k in s})
+    if not train:       # these worlds are in metres, so the floor and up found from the surface can be used (the trained ones' scale is not sure enough: see mesh_photos.py)
+        entry["method"] = "pieces"; meta = json.load(open(f"{d}/mesh_meta.json"))
+        if "up" in meta and "floor" in meta: entry["up"], entry["floor"] = meta["up"], meta["floor"]
     register(entry)
     stage("done")
 

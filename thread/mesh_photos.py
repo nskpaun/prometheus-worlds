@@ -1,5 +1,7 @@
 """Office mesh from photo depth: Depth Pro maps aligned to COLMAP's 3D points, fused into a volume, coloured by the photos.
   mesh_photos.py SCENE_DIR(office) OUT_PREFIX
+  mesh_photos.py SCENE_DIR OUT_PREFIX --surface SURFACE.ply [--tilt DEG]     the same finish for a surface fused already, in
+                                                                             metres with colours (photo_fuse.py's surface.ply)
 Writes OUT_PREFIX.glb (visual, with smoothed normals), OUT_PREFIX_collider.glb and OUT_PREFIX_meta.json with whichever of
 {"metre", "floor", "up"} could be estimated (raw trainer frame; the viewer falls back to its own guesses for missing ones).
 """
@@ -8,59 +10,64 @@ from PIL import Image
 from scipy import ndimage, sparse
 from scipy.spatial.transform import Rotation
 d, out = sys.argv[1:3]
-cams = {}
-for l in open(f"{d}/txt/cameras.txt"):
-    if l[0] != "#": v = l.split(); cams[int(v[0])] = (int(v[2]), int(v[3]), float(v[4]), float(v[5]), float(v[6]), float(v[7]))
-X = {}
-for l in open(f"{d}/txt/points3D.txt"):
-    if l[0] != "#": v = l.split(); X[int(v[0])] = [float(x) for x in v[1:4]]
-L = [l for l in open(f"{d}/txt/images.txt") if l[0] != "#"]
-imgs = []
-for a, b in zip(L[::2], L[1::2]):
-    v = a.split(); R = Rotation.from_quat([float(v[2]), float(v[3]), float(v[4]), float(v[1])]).as_matrix(); t = np.array([float(x) for x in v[5:8]])
-    p = np.array(b.split(), float).reshape(-1, 3); p = p[p[:, 2] >= 0]
-    imgs.append(dict(name=v[9], cam=int(v[8]), R=R, t=t, xy=p[:, :2], X=np.array([X[int(i)] for i in p[:, 2]])))
-# COLMAP frame -> trainer frame (the trainer re-centres and re-scales): match camera centres, trying plausible orderings
-P = np.array(json.load(open(f"{d}/scene.json"))["poses"])[:, :3, 3]
-def fit(src, dst):
-    ms, md = src.mean(0), dst.mean(0); U, sv, Vt = np.linalg.svd((dst - md).T @ (src - ms)); D = np.diag([1, 1, np.sign(np.linalg.det(U @ Vt))])
-    R = U @ D @ Vt; s = (sv * np.diag(D)).sum() / ((src - ms) ** 2).sum(); t = md - s * R @ ms
-    return s, R, t, np.abs(s * (R @ src.T).T + t - dst).max()
-best = None
-for label, order in (("file", imgs), ("name", sorted(imgs, key=lambda i: i["name"]))):
-    C = np.array([-i["R"].T @ i["t"] for i in order]); r = fit(C, P)
-    if best is None or r[3] < best[3]: best = (*r, label)
-s, Rs, ts, err, label = best
-print("frame fit: order by", label, "max error", float(err), "scale", float(s))
-assert err < 1e-3
-allX = np.array(list(X.values())); Xm = s * (Rs @ allX.T).T + ts
-lo, hi = np.percentile(Xm, [2, 98], axis=0); ctr, extent = (lo + hi) / 2, float((hi - lo).max()) * 1.25
-RES = 400; voxel = extent / RES; metres = []
-vol = o3d.pipelines.integration.UniformTSDFVolume(length=extent, resolution=RES, sdf_trunc=5 * voxel,
-        color_type=o3d.pipelines.integration.TSDFVolumeColorType.RGB8, origin=ctr - extent / 2)
-for im in imgs:
-    w, h, fx, fy, cx, cy = cams[im["cam"]]
-    mono = np.load(f"{d}/mono/{im['name'].rsplit('.', 1)[0]}.npy")
-    mono = np.asarray(Image.fromarray(mono).resize((w // 2, h // 2), Image.BILINEAR))
-    z = (im["X"] @ im["R"].T + im["t"])[:, 2] * s                       # true depth at the solved points, trainer units
-    u, v = np.clip((im["xy"] / 2).astype(int).T, 0, [[w // 2 - 1], [h // 2 - 1]])
-    m = mono[v, u]; ok = z > 0
-    A = np.stack([m, np.ones_like(m)], 1); keep = ok.copy()
-    for _ in range(4):                                                    # robust fit of 1/z = a*mono + b
-        coef = np.linalg.lstsq(A[keep], 1 / z[keep], rcond=None)[0]; res = np.abs(A @ coef - 1 / z) * z
-        keep = ok & (res < max(0.05, 2.5 * np.median(res[keep])))
-    inv = np.maximum(coef[0] * mono + coef[1], 1e-6); depth = 1 / inv
-    # Depth Pro's raw output is canonical inverse depth: metres = fx / (w * mono). A scale-only fit 1/z = k*mono gives trainer units per metre.
-    if keep.sum() >= 20 and (m[keep] > 0).all(): metres.append((w / fx) / np.median(1 / (z[keep] * m[keep])))
-    grad = ndimage.maximum_filter(depth, 5) / ndimage.minimum_filter(depth, 5)
-    depth[(grad > 1.12) | (depth > extent * 1.2)] = 0                    # drop flying pixels at depth edges
-    col = np.asarray(Image.open(f"{d}/dense/images/{im['name']}").convert("RGB").resize((w // 2, h // 2)))
-    rgbd = o3d.geometry.RGBDImage.create_from_color_and_depth(o3d.geometry.Image(np.ascontiguousarray(col)), o3d.geometry.Image(depth.astype(np.float32)),
-        depth_scale=1.0, depth_trunc=extent * 1.2, convert_rgb_to_intensity=False)
-    E = np.eye(4); E[:3, :3] = im["R"] @ Rs.T; E[:3, 3] = s * im["t"] - im["R"] @ Rs.T @ ts
-    vol.integrate(rgbd, o3d.camera.PinholeCameraIntrinsic(w // 2, h // 2, fx / 2, fy / 2, cx / 2, cy / 2), E)
-    print(im["name"], "points", int(keep.sum()), "of", len(z), "median error %.1f%%" % (100 * np.median(res[keep])))
-mesh = vol.extract_triangle_mesh()
+SURFACE = sys.argv[sys.argv.index("--surface") + 1] if "--surface" in sys.argv else None      # a surface fused elsewhere (photo_fuse.py), in metres
+TILT = float(sys.argv[sys.argv.index("--tilt") + 1]) if "--tilt" in sys.argv else 25.0             # how far the floor may lean from the cameras' up
+if SURFACE:
+    mesh = o3d.io.read_triangle_mesh(SURFACE); metres = [1.0, 1.0, 1.0]
+else:
+    cams = {}
+    for l in open(f"{d}/txt/cameras.txt"):
+        if l[0] != "#": v = l.split(); cams[int(v[0])] = (int(v[2]), int(v[3]), float(v[4]), float(v[5]), float(v[6]), float(v[7]))
+    X = {}
+    for l in open(f"{d}/txt/points3D.txt"):
+        if l[0] != "#": v = l.split(); X[int(v[0])] = [float(x) for x in v[1:4]]
+    L = [l for l in open(f"{d}/txt/images.txt") if l[0] != "#"]
+    imgs = []
+    for a, b in zip(L[::2], L[1::2]):
+        v = a.split(); R = Rotation.from_quat([float(v[2]), float(v[3]), float(v[4]), float(v[1])]).as_matrix(); t = np.array([float(x) for x in v[5:8]])
+        p = np.array(b.split(), float).reshape(-1, 3); p = p[p[:, 2] >= 0]
+        imgs.append(dict(name=v[9], cam=int(v[8]), R=R, t=t, xy=p[:, :2], X=np.array([X[int(i)] for i in p[:, 2]])))
+    # COLMAP frame -> trainer frame (the trainer re-centres and re-scales): match camera centres, trying plausible orderings
+    P = np.array(json.load(open(f"{d}/scene.json"))["poses"])[:, :3, 3]
+    def fit(src, dst):
+        ms, md = src.mean(0), dst.mean(0); U, sv, Vt = np.linalg.svd((dst - md).T @ (src - ms)); D = np.diag([1, 1, np.sign(np.linalg.det(U @ Vt))])
+        R = U @ D @ Vt; s = (sv * np.diag(D)).sum() / ((src - ms) ** 2).sum(); t = md - s * R @ ms
+        return s, R, t, np.abs(s * (R @ src.T).T + t - dst).max()
+    best = None
+    for label, order in (("file", imgs), ("name", sorted(imgs, key=lambda i: i["name"]))):
+        C = np.array([-i["R"].T @ i["t"] for i in order]); r = fit(C, P)
+        if best is None or r[3] < best[3]: best = (*r, label)
+    s, Rs, ts, err, label = best
+    print("frame fit: order by", label, "max error", float(err), "scale", float(s))
+    assert err < 1e-3
+    allX = np.array(list(X.values())); Xm = s * (Rs @ allX.T).T + ts
+    lo, hi = np.percentile(Xm, [2, 98], axis=0); ctr, extent = (lo + hi) / 2, float((hi - lo).max()) * 1.25
+    RES = 400; voxel = extent / RES; metres = []
+    vol = o3d.pipelines.integration.UniformTSDFVolume(length=extent, resolution=RES, sdf_trunc=5 * voxel,
+            color_type=o3d.pipelines.integration.TSDFVolumeColorType.RGB8, origin=ctr - extent / 2)
+    for im in imgs:
+        w, h, fx, fy, cx, cy = cams[im["cam"]]
+        mono = np.load(f"{d}/mono/{im['name'].rsplit('.', 1)[0]}.npy")
+        mono = np.asarray(Image.fromarray(mono).resize((w // 2, h // 2), Image.BILINEAR))
+        z = (im["X"] @ im["R"].T + im["t"])[:, 2] * s                       # true depth at the solved points, trainer units
+        u, v = np.clip((im["xy"] / 2).astype(int).T, 0, [[w // 2 - 1], [h // 2 - 1]])
+        m = mono[v, u]; ok = z > 0
+        A = np.stack([m, np.ones_like(m)], 1); keep = ok.copy()
+        for _ in range(4):                                                    # robust fit of 1/z = a*mono + b
+            coef = np.linalg.lstsq(A[keep], 1 / z[keep], rcond=None)[0]; res = np.abs(A @ coef - 1 / z) * z
+            keep = ok & (res < max(0.05, 2.5 * np.median(res[keep])))
+        inv = np.maximum(coef[0] * mono + coef[1], 1e-6); depth = 1 / inv
+        # Depth Pro's raw output is canonical inverse depth: metres = fx / (w * mono). A scale-only fit 1/z = k*mono gives trainer units per metre.
+        if keep.sum() >= 20 and (m[keep] > 0).all(): metres.append((w / fx) / np.median(1 / (z[keep] * m[keep])))
+        grad = ndimage.maximum_filter(depth, 5) / ndimage.minimum_filter(depth, 5)
+        depth[(grad > 1.12) | (depth > extent * 1.2)] = 0                    # drop flying pixels at depth edges
+        col = np.asarray(Image.open(f"{d}/dense/images/{im['name']}").convert("RGB").resize((w // 2, h // 2)))
+        rgbd = o3d.geometry.RGBDImage.create_from_color_and_depth(o3d.geometry.Image(np.ascontiguousarray(col)), o3d.geometry.Image(depth.astype(np.float32)),
+            depth_scale=1.0, depth_trunc=extent * 1.2, convert_rgb_to_intensity=False)
+        E = np.eye(4); E[:3, :3] = im["R"] @ Rs.T; E[:3, 3] = s * im["t"] - im["R"] @ Rs.T @ ts
+        vol.integrate(rgbd, o3d.camera.PinholeCameraIntrinsic(w // 2, h // 2, fx / 2, fy / 2, cx / 2, cy / 2), E)
+        print(im["name"], "points", int(keep.sum()), "of", len(z), "median error %.1f%%" % (100 * np.median(res[keep])))
+    mesh = vol.extract_triangle_mesh()
 tri, n_tri, _ = mesh.cluster_connected_triangles(); tri, n_tri = np.asarray(tri), np.asarray(n_tri)
 mesh.remove_triangles_by_mask(n_tri[tri] < n_tri.max() * 0.01); mesh.remove_unreferenced_vertices()
 print("raw tris", len(mesh.triangles))
@@ -115,7 +122,7 @@ unit = meta.get("metre", (h_hi - h_lo) / 2.4)                             # trai
 print("metre: Depth Pro %s over %d photos (spread %.2f); height-span guess %.3f" % ("%.3f" % meta["metre"] if "metre" in meta else "none", len(metres), np.std(metres) if metres else 0, (h_hi - h_lo) / 2.4))
 # Floor: planes among upward-facing points near the bottom (35% of the height range, at most 0.8 m so table tops stay out). Its normal is a better up than the mean camera up.
 o3d.utility.random.seed(0); mesh.compute_vertex_normals(); pc = mesh.sample_points_uniformly(200000); pts, nrm = np.asarray(pc.points), np.asarray(pc.normals)
-cand = pts[(pts @ up0 < h_lo + min(0.35 * (h_hi - h_lo), 0.8 * unit)) & (nrm @ up0 > np.cos(np.radians(25)))]; rest, planes = cand, []
+cand = pts[(pts @ up0 < h_lo + min(0.35 * (h_hi - h_lo), 0.8 * unit)) & (nrm @ up0 > np.cos(np.radians(TILT)))]; rest, planes = cand, []
 while len(rest) >= 1000 and len(planes) < 3:                              # peel up to three planes: the biggest may be a bed or a platform, not the floor
     idx = np.array(o3d.geometry.PointCloud(o3d.utility.Vector3dVector(rest)).segment_plane(0.05 * unit, 3, 10000)[1])   # 5 cm: fused monocular depth is wavy
     for _ in range(5):                                                    # least-squares refit on the inliers: the 3-point plane differs from run to run
@@ -129,7 +136,8 @@ if planes:
     for q in planes:                                                      # a clearly lower plane (not the same wavy floor) of comparable size and tilt is the real floor
         if q[2] < pick[2] - 0.3 * unit and q[0] >= 0.5 * big[0] and q[1] @ big[1] > np.cos(np.radians(10)): pick = q
     cnt, n, h, fl = pick; tilt = np.degrees(np.arccos(min(1, n @ up0)))
-    if big[0] >= max(1000, 0.25 * len(cand)) and tilt < 25 and abs(h - h_lo) < 0.3 * unit:   # and it must agree with the lowest heights of the mesh
+    if big[0] >= max(1000, 0.25 * len(cand)) and tilt < TILT and (abs(h - h_lo) < 0.3 * unit or TILT > 45):   # and it must agree with the lowest heights of the mesh
+                                                                          # (not asked of one photo: the heights are along its camera's up, which may lean far from the real one)
         meta["up"] = n.tolist(); meta["floor"] = fl                       # floor = height along meta["up"]; use the two together
     else: print("floor plane rejected: %d points, tilt %.1f deg, %.3f against lowest heights %.3f" % (cnt, tilt, h, h_lo))
 if "floor" not in meta: print("floor plane: not found, the viewer keeps its percentile guess (%.3f along camera up)" % h_lo)
