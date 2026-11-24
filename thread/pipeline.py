@@ -316,6 +316,8 @@ def prompt_direct(d, name, sentence, style="", blender=False):
         env["EXPORT_PX"] = os.environ.get("EXPORT_PX", "128,224,320")
         step("level", [PY, b("export.py"), d, f"{d}/blender/level", "level"])             # the room, the sculpted things and the small plain ones, textured, with the lamps
         step("blender", [PY, "-B", os.path.join(HERE, "blender_world.py"), "assemble", d])
+        stage("art direction: the sky, then a look at the place")
+        step("direct", [PY, "-B", os.path.join(HERE, "blender_direct.py"), d, sentence])
         stage("baking the light")
         step("bake", BW.local_only([app, "-b", f"{d}/blender/scene.blend", "--python", os.path.join(HERE, "blender_finish.py"), "--", d, os.environ.get("BLENDER_PICTURE", "4096"), os.environ.get("BLENDER_SAMPLES", "64")]))
         stage("writing the world")
@@ -331,7 +333,7 @@ def prompt_direct(d, name, sentence, style="", blender=False):
 
 def blender_entry(d, name, sentence, style):
     rel = url(d); s = json.load(open(f"{d}/scene.json")); things = json.load(open(f"{d}/blender/meta.json"))["things"]
-    return {"name": name, **s, **{k: f"{rel}/{s[k]}" for k in ("model", "env", "mesh", "collider") if k in s}, "lightmaps": [f"{rel}/{f}" for f in s.get("lightmaps", [])], "note": f"built in Blender, {things} things: {sentence[:50]}", "kind": "blender", "method": "blender", "style": style or sentence}
+    return {"name": name, **s, **{k: f"{rel}/{s[k]}" for k in ("model", "env", "sky_pano", "mesh", "collider") if k in s}, "lightmaps": [f"{rel}/{f}" for f in s.get("lightmaps", [])], "note": f"built in Blender, {things} things: {sentence[:50]}", "kind": "blender", "method": "blender", "style": style or sentence}
 
 def blender_own(d, name, sentence, style=""):
     """A place the direct method cannot plan (outdoors): the model plans all of it itself and builds every thing in Blender
@@ -340,6 +342,8 @@ def blender_own(d, name, sentence, style=""):
     os.makedirs(d, exist_ok=True); url(d); t = time.time(); env = {"PYTHONDONTWRITEBYTECODE": "1"}; app = BW.find_blender(); mem = Memory()
     stage("building the place in Blender")
     run([PY, "-B", "blender_world.py", "own", d, sentence] + ([style] if style else []), env, watch=mem)
+    stage("art direction: the sky, then a look at the place")
+    run([PY, "-B", "blender_direct.py", d, sentence], env, watch=mem)
     stage("baking the light")
     run(BW.local_only([app, "-b", f"{d}/blender/scene.blend", "--python", os.path.join(HERE, "blender_finish.py"), "--", d, os.environ.get("BLENDER_PICTURE", "4096"), os.environ.get("BLENDER_SAMPLES", "64")]), env, watch=mem)
     stage("writing the world")

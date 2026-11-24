@@ -114,6 +114,34 @@ def has_look(o):
         if any(n.type == "TEX_COORD" for n in s.material.node_tree.nodes): return False       # laid on by position (the kit's swatches), not by coordinates
     return True
 
+def relief(objs, strength=1.5, made=None):
+    """A normal map for each picture that colours these objects, from the picture itself: its fine light and dark read as
+    small bumps (the grain of plaster, boards, stone), the broad changes left out. The glTF carries it, and the viewer
+    shades it as if lit from above; Cycles bakes on as before. -> number of maps made"""
+    made = {} if made is None else made
+    for m in {s.material for o in objs for s in o.material_slots if s.material and s.material.node_tree}:
+        nt = m.node_tree; b = next((n for n in nt.nodes if n.type == "BSDF_PRINCIPLED"), None)
+        if b is None or b.inputs["Normal"].is_linked or not b.inputs["Base Color"].is_linked: continue
+        src = b.inputs["Base Color"].links[0].from_node
+        if src.type != "TEX_IMAGE" or src.image is None or src.image.size[0] < 64: continue
+        key = src.image.name
+        if key not in made:
+            px = pixels(src.image)[..., :3] @ LUM; h = px.shape[0]; w = px.shape[1]
+            k = max(1, int(round(min(h, w) / 512)))                                 # work at about 512 px, then the map is scaled up by Blender's sampling
+            small = px[::k, ::k].astype(np.float32)
+            def blur(a, r):
+                c = np.cumsum(np.pad(a, ((r + 1, r), (0, 0)), mode="wrap"), 0); a = (c[2 * r + 1:] - c[:-2 * r - 1]) / (2 * r + 1)
+                c = np.cumsum(np.pad(a, ((0, 0), (r + 1, r)), mode="wrap"), 1); return (c[:, 2 * r + 1:] - c[:, :-2 * r - 1]) / (2 * r + 1)
+            hgt = blur(small, 1) - blur(small, 12); hgt /= max(float(np.percentile(np.abs(hgt), 98)), 1e-4)       # fine detail only, about -1..1
+            gx = (np.roll(hgt, -1, 1) - np.roll(hgt, 1, 1)) * 0.5 * strength / 8; gy = (np.roll(hgt, -1, 0) - np.roll(hgt, 1, 0)) * 0.5 * strength / 8
+            n = np.stack([-gx, -gy, np.ones_like(gx)], -1); n /= np.linalg.norm(n, axis=-1, keepdims=True)
+            img = bpy.data.images.new(key + "_relief", n.shape[1], n.shape[0], alpha=False); img.colorspace_settings.name = "Non-Color"
+            img.pixels.foreach_set(np.concatenate([n * 0.5 + 0.5, np.ones(n.shape[:2] + (1,), np.float32)], -1).astype(np.float32).ravel()); img.pack(); made[key] = img
+        t = nt.nodes.new("ShaderNodeTexImage"); t.image = made[key]; t.interpolation = "Linear"
+        if src.inputs["Vector"].is_linked: nt.links.new(src.inputs["Vector"].links[0].from_socket, t.inputs["Vector"])
+        nm = nt.nodes.new("ShaderNodeNormalMap"); nm.inputs["Strength"].default_value = 1.0; nt.links.new(t.outputs["Color"], nm.inputs["Color"]); nt.links.new(nm.outputs["Normal"], b.inputs["Normal"])
+    return len(made)
+
 def bake_light(sets, dense, size, samples):
     """The light alone (no surface colour): onto a lightmap for each set of objects in `sets`, into the corners of the
     `dense` ones. -> the lightmaps' pixels (linear, alpha where a face is), one per set."""
@@ -215,15 +243,29 @@ def main(d, size=4096, samples=64):
     sets = [x for x in ([o for o in flat if o.get("room_part")], [o for o in flat if not o.get("room_part")]) if x]      # the room's large plain surfaces on a lightmap of their own, so the many small things do not crowd them out
     lms = bake_light(sets, dense, size, samples); print(f"light baked onto {len(flat)} pieces ({len(sets)} lightmaps) and into the corners of {len(dense)} dense ones in {time.time() - t:.0f} s", flush=True); t = time.time()
     lit = [(lm[..., :3] @ LUM)[lm[..., 3] > 0.5][::5] for lm in lms[:1]] + [(corner_light(o)[:, :3] @ LUM)[::5] for o in dense]; lum = np.concatenate(lit) if lit else np.zeros(1, np.float32); lum = lum[np.isfinite(lum)]
-    mid = float(np.percentile(lum, 55)) if len(lum) else 0.4
-    gain = float(np.clip((0.62 / max(mid, 1e-6)) ** 0.9, 1e-3, 1e4))          # a mid-toned surface in middling light comes out a middle grey
-    for k, lm in enumerate(lms): np.save(os.path.join(work, f"light{k}.npy"), encode(lm[::-1, :, :3], gain))   # Blender's pictures start at the bottom row
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__))); import blender_direct as DIR
+    skyp = list(sc["sky"]) if sc.get("sky") else None
+    hour = sc.get("hour") or DIR.hour_of(d) or ("day" if not skyp or skyp[3] >= 0.5 else "dusk" if skyp[3] >= 0.1 else "night")
+    gain = DIR.exposure(lum, hour, float(sc.get("exposure_ev", 0.0))) if len(lum) else 1.0    # by day a mid-toned surface comes out a middle grey; at dusk and night the lamps' pools set it
+    wb = DIR.white_balance([lm[..., :3][lm[..., 3] > 0.5] for lm in lms[:1]] + [corner_light(o)[:, :3] for o in dense])    # as a camera balanced to the room's own light: most of a lamp's colour cast taken out
+    for k, lm in enumerate(lms): np.save(os.path.join(work, f"light{k}.npy"), encode(lm[::-1, :, :3] * wb, gain))   # Blender's pictures start at the bottom row
     for o in dense:
-        a = o.data.color_attributes["Col"]; v = corner_light(o); v[:, :3] = (np.nan_to_num(v[:, :3]).clip(0, None) * (gain / LM_MAX)).clip(0, 1); v[:, 3] = 1; a.data.foreach_set("color", v.ravel())
+        a = o.data.color_attributes["Col"]; v = corner_light(o); v[:, :3] = (np.nan_to_num(v[:, :3]).clip(0, None) * wb * (gain / LM_MAX)).clip(0, 1); v[:, 3] = 1; a.data.foreach_set("color", v.ravel())
+    if os.environ.get("BLENDER_RELIEF") != "0":
+        try: print(f"relief: {relief([o for o in keep if o.get('room_part')])} normal maps for the room's surfaces (after the bake: the lightmaps stay smooth)", flush=True)
+        except Exception as e: print("relief left out:", e, flush=True)
     # 3. where to stand, and what is seen from there
     allV = np.concatenate([np.array([o.matrix_world @ Vector(c) for c in o.bound_box], np.float32) for o in show]); lo, hi = Vector(allV.min(0).tolist()), Vector(allV.max(0).tolist())
     eye, fwd = stand(tops, room, lo, hi)
-    pano = panorama(eye, os.path.join(work, "pano.exr")); np.save(os.path.join(work, "env.npy"), encode(pano[::-1], gain)); print(f"panorama in {time.time() - t:.0f} s", flush=True); t = time.time()
+    pano = panorama(eye, os.path.join(work, "pano.exr")); np.save(os.path.join(work, "env.npy"), encode(pano[::-1] * wb, gain)); print(f"panorama in {time.time() - t:.0f} s", flush=True); t = time.time()
+    # the painted sky round the place (blender_direct.py), at the same exposure, for the viewer to show behind the windows
+    sky_k = None
+    if sc.get("sky_picture") and os.path.exists(sc["sky_picture"]):
+        img = bpy.data.images.load(sc["sky_picture"]); img.colorspace_settings.name = "sRGB"; px = pixels(img)[::-1, :, :3] * float(sc.get("sky_strength", 1.0)) * float(sc.get("sky_seen", 1.0)) * wb * gain; bpy.data.images.remove(img)
+        px *= min(1.0, 0.8 / max(float(np.median(px[: px.shape[0] // 2] @ LUM)), 1e-6))     # its sky's middle tone just under white: a view, not a glare
+        sky_k = float(max(np.percentile(px @ LUM, 99.5), 1e-3)); x = (px / sky_k).clip(0, 1)
+        np.save(os.path.join(work, "sky.npy"), (np.where(x <= 0.0031308, 12.92 * x, 1.055 * np.power(np.maximum(x, 1e-8), 1 / 2.4) - 0.055) * 255 + 0.5).astype(np.uint8))
+    elif os.path.exists(os.path.join(work, "sky.npy")): os.remove(os.path.join(work, "sky.npy"))
     # 4. the plain copy (one colour a thing) and the world's own file
     PV, PT, PC = [], [], []; n = 0
     for o in show:
@@ -240,7 +282,7 @@ def main(d, size=4096, samples=64):
         x = np.array(c[:3], np.float32) * k * gain; x = x * (1 + x / 16.0) / (1 + x)
         return [round(float(v), 3) for v in np.where(x <= 0.0031308, 12.92 * x, 1.055 * np.power(np.maximum(x, 1e-8), 1 / 2.4) - 0.055).clip(0, 1)]
     meta = {"room": room, "setting": "indoor" if room else "outdoor", "lo": list(lo), "hi": list(hi), "eye": eye, "forward": fwd, "gain": gain, "light_max": LM_MAX, "lightmaps": len(lms),
-            "backdrop": tone(sky, sky[3]) if sky else [0.02, 0.02, 0.03], "things": len(tops), "faces": int(sum(len(t) for t in PT)), "pieces": len(show), "size": size, "samples": samples}
+            "backdrop": tone(sky, sky[3]) if sky else [0.02, 0.02, 0.03], "things": len(tops), "hour": hour, "sky_k": sky_k, "white_balance": [round(float(x), 3) for x in wb], "faces": int(sum(len(t) for t in PT)), "pieces": len(show), "size": size, "samples": samples}
     json.dump(meta, open(os.path.join(work, "meta.json"), "w"), indent=1)
     print(f"exposure gain {gain:.3g}, {len(tops)} things, {meta['faces']} faces in {len(show)} pieces; written in {time.time() - t:.0f} s ({time.time() - t0:.0f} s in all)", flush=True)
 

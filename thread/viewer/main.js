@@ -2,6 +2,11 @@ import * as THREE from "three";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 import { TransformControls } from "three/addons/controls/TransformControls.js";
 import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
+import { EffectComposer } from "three/addons/postprocessing/EffectComposer.js";
+import { RenderPass } from "three/addons/postprocessing/RenderPass.js";
+import { GTAOPass } from "three/addons/postprocessing/GTAOPass.js";
+import { UnrealBloomPass } from "three/addons/postprocessing/UnrealBloomPass.js";
+import { OutputPass } from "three/addons/postprocessing/OutputPass.js";
 import { SplatMesh, SparkRenderer, SplatEdit, SplatEditSdf, SplatEditSdfType, SplatEditRgbaBlendMode } from "@sparkjsdev/spark";
 import RAPIER from "rapier";
 import { createAudio, gust, hash } from "./audio.js";
@@ -18,6 +23,38 @@ renderer.shadowMap.enabled = true;
 renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 document.body.appendChild(renderer.domElement);
 const scene = new THREE.Scene();
+// A world built in Blender is drawn as a film would be: in high dynamic range into a multisampled buffer, then contact shadows
+// (GTAO, at the small scale the lightmaps are too coarse to hold), a glow round lamps, bright panes and sunlit patches (bloom),
+// and AgX tone mapping, which takes very bright light to a soft white instead of a hard clipped colour. Splat worlds are drawn
+// as they always were. `?post=0` in the address turns it off, to compare.
+const film = {
+  on: false, allowed: new URLSearchParams(location.search).get("post") !== "0", composer: null,
+  tm: { agx: THREE.AgXToneMapping, aces: THREE.ACESFilmicToneMapping, neutral: THREE.NeutralToneMapping }[new URLSearchParams(location.search).get("tm")] ?? THREE.NeutralToneMapping,
+  ev: +(new URLSearchParams(location.search).get("ev") ?? 0.9),
+  make() {
+    if (this.composer) return;
+    const size = renderer.getDrawingBufferSize(new THREE.Vector2());
+    const rt = new THREE.WebGLRenderTarget(size.x, size.y, { type: THREE.HalfFloatType, samples: 4 });
+    const c = this.composer = new EffectComposer(renderer, rt);
+    c.addPass(new RenderPass(scene, camera));
+    const ao = this.ao = new GTAOPass(scene, camera, size.x, size.y);
+    ao.updateGtaoMaterial({ radius: 0.35, distanceExponent: 1.6, thickness: 1.2, scale: 1.0, samples: 12 });
+    ao.updatePdMaterial({ lumaPhi: 10, depthPhi: 2, normalPhi: 3, radius: 6, rings: 2, samples: 16 }); ao.blendIntensity = 0.75; c.addPass(ao);
+    this.bloom = new UnrealBloomPass(new THREE.Vector2(size.x, size.y), 0.22, 0.5, 1.4); c.addPass(this.bloom);
+    c.addPass(new OutputPass());
+  },
+  set(on) {
+    on = on && this.allowed; if (on === this.on) return; this.on = on;
+    if (on) this.make();
+    renderer.toneMapping = on ? this.tm : THREE.NoToneMapping; renderer.toneMappingExposure = on ? this.ev : 1;
+    scene.traverse((o) => { if (o.isMesh && o.material?.userData.baked) o.material.needsUpdate = true; });
+  },
+  resize() {
+    if (!this.composer) return;
+    const r = renderer.getPixelRatio(); this.composer.setPixelRatio(r); this.composer.setSize(innerWidth, innerHeight);
+  },
+  render(dt) { if (this.on) this.composer.render(dt); else renderer.render(scene, camera); },
+};
 const camera = new THREE.PerspectiveCamera(65, innerWidth / innerHeight, 0.01, 100);
 // The trainer (msplat) adds 0.3 px² to every splat's screen footprint with no opacity change; Spark's default (blurAmount) dims small splats instead.
 const spark = new SparkRenderer({ renderer, preBlurAmount: 0.3, blurAmount: 0 }); scene.add(spark);
@@ -33,11 +70,11 @@ function setBlur() {
   const viewFocal = renderer.getDrawingBufferSize(new THREE.Vector2()).y / 2 / Math.tan(THREE.MathUtils.degToRad(camera.fov / 2));
   spark.preBlurAmount = blurFor(viewFocal, (E.on ? [...E.parts.values()] : S.parts).map((p) => trainFocal(p.def)));
 }
-addEventListener("resize", () => { renderer.setPixelRatio(Math.min(devicePixelRatio, 2)); renderer.setSize(innerWidth, innerHeight); camera.aspect = innerWidth / innerHeight; camera.updateProjectionMatrix(); setBlur(); });
+addEventListener("resize", () => { renderer.setPixelRatio(Math.min(devicePixelRatio, 2)); renderer.setSize(innerWidth, innerHeight); camera.aspect = innerWidth / innerHeight; camera.updateProjectionMatrix(); setBlur(); film.resize(); });
 
 await RAPIER.init();
 const gltf = new GLTFLoader();
-window.S = S; window.THREE = THREE; window.camera = camera; window.orbit = orbit; window.scene = scene; window.renderer = renderer; window.fly = fly;
+window.S = S; window.THREE = THREE; window.camera = camera; window.orbit = orbit; window.scene = scene; window.renderer = renderer; window.fly = fly; window.film = film;
 
 const lamp = new THREE.PointLight(0xffc27a, 1, 0, 2);
 lamp.castShadow = true; lamp.shadow.mapSize.set(1024, 1024); lamp.shadow.bias = -0.004; lamp.shadow.normalBias = 0.06; lamp.shadow.radius = 4;
@@ -118,6 +155,13 @@ function geometryFrom(tris, grey = 0.62) {
 // under white softly. No lights of the viewer's own.
 const lightChunk = THREE.ShaderChunk.lights_fragment_maps
   .replace("iblIrradiance += getIBLIrradiance( geometryNormal );", "")                 // the lightmap IS the light that falls on a surface: none from the panorama on top
+  // relief: the lightmap holds no direction, so a surface's normal map is shaded as if its light came from above (lamps mostly hang
+  // or stand higher than what they light): a bump's upper side a little brighter, its lower side darker
+  .replace("irradiance += lightMapIrradiance;", `irradiance += lightMapIrradiance;
+    #ifdef USE_NORMALMAP
+      { vec3 upV = normalize( ( viewMatrix * vec4( 0.0, 1.0, 0.0, 0.0 ) ).xyz );
+        irradiance *= clamp( 1.0 + 1.4 * ( dot( normal, upV ) - dot( nonPerturbedNormal, upV ) ), 0.55, 1.45 ); }
+    #endif`)
   + `\n#if defined( USE_ENVMAP ) && defined( RE_IndirectSpecular )
   { vec3 lit = irradiance;                                                              // a reflection fades where little light reaches: no bright shine in a dark corner
     #ifdef USE_COLOR
@@ -127,13 +171,15 @@ const lightChunk = THREE.ShaderChunk.lights_fragment_maps
 const softWhite = "gl_FragColor.rgb = gl_FragColor.rgb * ( 1.0 + gl_FragColor.rgb / 16.0 ) / ( 1.0 + gl_FragColor.rgb );";      // extended Reinhard: white at 4
 function bakedLook(m) {
   m.onBeforeCompile = (sh) => {
-    sh.fragmentShader = sh.fragmentShader.replace("#include <lights_fragment_maps>", lightChunk).replace("#include <tonemapping_fragment>", softWhite);
+    sh.fragmentShader = sh.fragmentShader.replace("#include <lights_fragment_maps>", lightChunk);
+    if (!film.on) sh.fragmentShader = sh.fragmentShader.replace("#include <tonemapping_fragment>", softWhite);   // with post, AgX does this at the end
   };
-  m.customProgramCacheKey = () => "baked-look"; return m;
+  m.customProgramCacheKey = () => (film.on ? "baked-look-hdr" : "baked-look"); m.userData.baked = true; return m;
 }
 async function bakedModel(def) {
   const tl = new THREE.TextureLoader(), held = [], K = def.light_max ?? 8;
-  const [g, envPic, ...lms] = await Promise.all([gltf.loadAsync(def.model).then((x) => x.scene), def.env ? tl.loadAsync(def.env) : null, ...(def.lightmaps ?? []).map((u) => tl.loadAsync(u))]);
+  const [g, envPic, skyPic, ...lms] = await Promise.all([gltf.loadAsync(def.model).then((x) => x.scene), def.env ? tl.loadAsync(def.env) : null, def.sky_pano ? tl.loadAsync(def.sky_pano).catch(() => null) : null, ...(def.lightmaps ?? []).map((u) => tl.loadAsync(u))]);
+  if (skyPic) { skyPic.mapping = THREE.EquirectangularReflectionMapping; skyPic.colorSpace = THREE.SRGBColorSpace; held.push(skyPic); g.userData.sky = { map: skyPic, k: def.sky_k ?? 1 }; }   // the painted sky, behind the windows
   const white = new THREE.DataTexture(new Uint8Array([255, 255, 255, 255]), 1, 1); white.needsUpdate = true; held.push(white);
   let env = null;
   if (envPic) { envPic.mapping = THREE.EquirectangularReflectionMapping; envPic.colorSpace = THREE.SRGBColorSpace; const pm = new THREE.PMREMGenerator(renderer); env = pm.fromEquirectangular(envPic).texture; pm.dispose(); envPic.dispose(); held.push(env); }
@@ -296,7 +342,7 @@ function clearWorld() {
   for (const p of S.parts) disposePart(p);
   for (const b of S.balls) { scene.remove(b.mesh); b.mesh.material.dispose(); }      // the sphere geometry is shared, keep it
   S.phys?.free();                                                                   // Rapier's memory is not garbage collected
-  clearEdits(); S.parts = []; S.balls = []; S.phys = null; S.net = null; S.world = null; S.ready = false;
+  film.set(false); scene.background = null; clearEdits(); S.parts = []; S.balls = []; S.phys = null; S.net = null; S.world = null; S.ready = false;
   S.wind = null; S.bound = null; S.zones = null; S.sky = false; tour.path = null; S.emitters = 0; sky.visible = false; orbit.maxDistance = Infinity; audio.detachAll();
 }
 
@@ -350,6 +396,8 @@ async function load(def) {
       ...doors.map((d) => ({ x: d.centre.x, z: d.centre.z, yaw: d.yaw, hx: DOOR.w / 2 - 0.2, hz: d.depth / 2 + 0.45, y0: 0.3, y1: DOOR.h - 0.25 }))];
     for (const z of S.zones) { z.cos = Math.cos(z.yaw); z.sin = Math.sin(z.yaw); }
   }
+  const painted = S.parts.find((p) => p.splat.userData?.sky)?.splat.userData.sky;
+  S.painted = painted ?? null; if (painted) { S.sky = false; scene.backgroundIntensity = painted.k; }
   // start where the first part's photos were taken (or its first generated view)
   const p0 = S.parts[0], d0 = p0.def;
   const c = new THREE.Vector3(...(d0.eye ?? d0.center)).applyMatrix4(p0.inner.matrixWorld);
@@ -389,7 +437,8 @@ function apply() {
     p.pre.visible = p.lit.visible = night && mode !== "collider";
     setMotionVisible(p, mode, night);
   }
-  sky.visible = !!S.sky && mode === "splat";
+  sky.visible = !!S.sky && mode === "splat"; scene.background = S.painted && mode === "splat" ? S.painted.map : null;
+  film.set(mode === "splat" && !night && !E.on && S.parts.length > 0 && S.parts.every((p) => p.def.model));
   ambient.visible = night; back.visible = night && mode === "splat"; lamp.visible = night; dragHelper.visible = night; drag.enabled = night;
 }
 document.querySelectorAll("input[name=mode]").forEach((r) => r.addEventListener("change", apply));
@@ -453,7 +502,7 @@ renderer.setAnimationLoop(() => {
   orbit.update();
   back.position.copy(camera.position); back.scale.setScalar(camera.far * 0.5);
   sky.position.copy(camera.position); sky.scale.setScalar(camera.far * 0.5);
-  renderer.render(scene, camera);
+  film.render(dt);
   if (audio.running) {
     if (now - clock.windAt > 100) { clock.windAt = now; audio.setWind(w); }      // ten times a second is plenty for a slow curve
     audio.update(camera);

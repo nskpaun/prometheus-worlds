@@ -85,3 +85,26 @@ class Repairs(unittest.TestCase):
            f"heavy curtains reach from floor to ceiling ({cu['size'][1]:.2f} m of 3 m), are centred on the window near them and drawn apart to show it")
 
 if __name__ == "__main__": unittest.main()
+
+class Seating(unittest.TestCase):
+    """Chairs written as rows of free chairs are set round the tables, facing them; coffee tables are left alone."""
+    def raw(self, chairs=10, tables=2, kind="round dining table"):
+        th = [{"name": kind, "said": True, "form": "table", "size": [0.8, 0.75, 0.8], "place": {"floor": "free", "at": [0.45 + 0.05 * k, 0.5]}} for k in range(tables)]
+        th += [{"name": "wooden chair", "said": True, "form": "sculpted", "size": [0.45, 0.85, 0.45], "place": {"floor": "free", "at": [0.2 + 0.06 * k, 0.3]}} for k in range(chairs)]
+        return {"room": {"width": 6, "depth": 8, "height": 3}, "things": th}
+
+    def test_chairs_round_tables_facing_them(self):
+        import math
+        w = L.place("A dining room: two round dining tables with chairs in the middle.", self.raw())
+        tabs = [o for o in w["objects"] if "table" in o["name"]]; chs = [o for o in w["objects"] if "chair" in o["name"]]
+        self.assertEqual(len(tabs), 2); self.assertEqual(len(chs), 8)                     # four a table, two left out
+        self.assertGreater(abs(tabs[0]["prims"][0]["c"][0] - tabs[1]["prims"][0]["c"][0]) + abs(tabs[0]["prims"][0]["c"][2] - tabs[1]["prims"][0]["c"][2]), 1.2)   # spread, not piled
+        for c in chs:
+            x, z = c["prims"][0]["c"][0], c["prims"][0]["c"][2]; t = min(tabs, key=lambda t: (t["prims"][0]["c"][0] - x) ** 2 + (t["prims"][0]["c"][2] - z) ** 2)
+            dx, dz = t["prims"][0]["c"][0] - x, t["prims"][0]["c"][2] - z
+            self.assertLess(math.hypot(dx, dz), 1.3)
+            self.assertGreater(math.sin(c["yaw"]) * dx + math.cos(c["yaw"]) * dz, 0)        # its front is toward its table
+
+    def test_coffee_tables_are_not_sat_at(self):
+        w = L.place("A lounge.", self.raw(chairs=3, tables=1, kind="coffee table"))
+        self.assertFalse(any("chairs set round" in r for r in w["repairs"]))

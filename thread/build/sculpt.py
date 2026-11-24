@@ -67,6 +67,17 @@ def plan(layout_path, seconds=330.0):
     n = lambda q: sum(v == q for v in chosen.values())
     print(f"{len(objs)} objects, {len(kinds)} kinds: {n('full')} sculpted in full, {n('mid')} mid, {n('fast')} fast, {len(P['plain'])} plain; {len(cut)} kinds ({len(gone)} objects) cut for time; planned {spent:.0f} of {seconds:.0f} s")
 
+def outline_want(w, h, d, flat=False):
+    """How tall against how wide a thing of this box looks in its picture: from the front for a thing on a wall, else from
+    the front three-quarter view a little from above (its top seen as a band of about a third of its depth)."""
+    return h / max(w, 1e-3) if flat else (h + 0.3 * d) / max(0.75 * (w + d), 1e-3)
+
+def outline_of(px):
+    """The object's outline in a picture on a plain backdrop: its height over its width. None when there is no object."""
+    res, _ = SH.backdrop(px); ys, xs = np.nonzero(res > 0.16)
+    if len(ys) < 50: return None
+    return float((np.percentile(ys, 99.5) - np.percentile(ys, 0.5) + 1) / (np.percentile(xs, 99.5) - np.percentile(xs, 0.5) + 1))
+
 def pictures():
     os.environ["HF_HUB_OFFLINE"] = "1"                  # the weights are on disk already (setup.sh); never call out
     import mlx.core as mx
@@ -85,11 +96,19 @@ def pictures():
         if not prop and hs_ >= 1.6 * max(ws_, ds_): prop = f"tall and narrow, standing upright, about {hs_ / max(ws_, ds_):.1f} times as tall as it is wide"       # else a bookcase comes back as a low cabinet
         coloured = bool(SH.BLUISH.search(look) or SH.GREENISH.search(look)); best = None
         view = "seen from straight in front" if o["attach"] == "wall" else "seen from the front three-quarter view, slightly from above"
-        for seed, colour in (((7, "bright blue"), (7, "bright green")) if coloured else ((7, "bright blue"), (8, "bright blue"))):
-            prompt = (f"Product photo of {look}{', ' + prop if prop else ''}. One single whole object, centred, entirely in frame with a margin around it, {view}, "
+        want = outline_want(ws_, hs_, ds_, o["attach"] == "wall")
+        whole = f"A piece of furniture {round(hs_ * 100)} cm tall: it stands on its own legs or base; show the whole {o['name']} from the side, legs and all"
+        tries = ((7, "bright blue", False), (7, "bright green", False)) if coloured else ((7, "bright blue", False), (8, "bright blue", False))
+        tries += ((9, "bright green" if coloured else "bright blue", True), (10, "bright green" if coloured else "bright blue", True))
+        for seed, colour, insist in tries:
+            if insist and best and best[0][0]: break                     # the plain wording gave a whole object of the right build: done
+            prompt = (f"Product photo of {look}{', ' + prop if prop else ''}{'. ' + whole if insist else ''}. One single whole object, centred, entirely in frame with a margin around it, {'seen from eye level at a slight angle' if insist else view}, "
                       f"isolated on a plain flat solid {colour} background, no shadow, no floor, even soft lighting.")
             img = model.generate_image(seed=seed, prompt=prompt, num_inference_steps=q["pic_steps"], width=q["px"], height=q["px"])
-            fg, rim = SH.framing(np.asarray(img.image.convert("RGB"), np.float32) / 255); score = (rim < 0.03, fg if coloured else -rim)
+            px_ = np.asarray(img.image.convert("RGB"), np.float32) / 255; fg, rim = SH.framing(px_); got = outline_of(px_)
+            built = got is not None and got >= 0.75 * want                  # a table pictured as only its top is a flat disc: far flatter than its box
+            if got is not None and not built: print(k, f"pictured {got:.2f} as tall as wide where its box looks {want:.2f}: too flat, asked again", flush=True)
+            score = (built and rim < 0.03, built, fg if coloured else -rim)
             if 0.02 < fg < 0.8 and rim <= 0.10 and (best is None or score > best[0]): best = (score, img)
             if best and best[0][0] and not coloured: break
         if not best: SH.give_up(k, "could not be pictured whole on a plain backdrop", NO_SHAPE); continue

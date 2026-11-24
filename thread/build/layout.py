@@ -286,8 +286,11 @@ def told(req, things, say):
         m = SIDE.search(clause); mid = re.search(r"\bin the (middle|centre|center)\b", clause)
         if not m and not mid: continue
         cut = (m or mid).start(); head = set(LB.stems(clause[:cut])) - {LB.stem(w) for w in LB.STOPS | LB.VAGUE}       # the thing is named before the place
+        many = {}
+        for t in things: many[t["name"].strip().lower()] = many.get(t["name"].strip().lower(), 0) + 1
         for t in things:
             pl = t["place"]; ws = [w for w in words_of(t["name"]) if w in head]
+            if mid and not m and many[t["name"].strip().lower()] > 1: continue          # "tables in the middle": several things keep their own spread, not one pile on the centre point
             if not t["said"] or not ws or any(k in pl for k in ("on", "beside", "front_of", "under", "ceiling")): continue
             if not LB.same(words_of(t["name"])[-1], ws[-1]) and len(ws) < 2: continue                                 # the clause must name the thing itself, not its material
             if m:
@@ -792,15 +795,64 @@ def fill(req, room, placed, openings, pools, fullness, n0):
             if p["form"] == "board" and p["size"][2] * k >= 0.15 and p["size"][1] * k <= 0.25: dress(i, w, max(0.2, p["size"][2] * k), "board", 0)
     return out
 
+SEAT_TABLE = re.compile(r"\b(table|desk)s?\b"); NOT_DINING = re.compile(r"\b(coffee|side|bedside|console|end|night|dressing|pool|work|drafting|billiard|changing|ironing|picnic|operating|potting)\b")
+SEAT = re.compile(r"\bchairs?\b"); NOT_SEAT = re.compile(r"\b(arm|easy|rocking|high|lounge|deck|wheel|swivel|office|throne|recliner)")
+
+def seat(room, things, say):
+    """Chairs go round tables, as people would sit: the free-standing tables that are sat at (not coffee or side tables)
+    are spread over the floor, the free-standing chairs dealt out among them (four to a table at least 70 cm across,
+    two to a smaller one, one to a desk), each set on its own side of its table, and turned to face it after placing
+    (see face()). A model that writes "chairs" as a grid of rows would otherwise make a lecture hall of a cafe.
+    Chairs beyond what the tables seat are left out. Nothing is done unless there are both."""
+    W, _, D = room; free = lambda t: t["place"].get("floor") == "free" and not any(k in t["place"] for k in ("on", "beside", "front_of", "under"))
+    tables = [t for t in things if free(t) and SEAT_TABLE.search(t["name"].lower()) and not NOT_DINING.search(t["name"].lower()) and max(t["w"], t["d"]) <= 2.6]
+    chairs = [t for t in things if free(t) and SEAT.search(t["name"].lower()) and not NOT_SEAT.search(t["name"].lower())]
+    if not tables or not chairs: return things
+    for t in [t for t in tables if t.get("count", 1) > 1]:                # "four tables" written once with a count: four tables, each with its own chairs
+        k = things.index(t); copies = [dict(t, count=1, place=dict(t["place"])) for _ in range(int(t["count"]))]
+        things = things[:k] + copies + things[k + 1:]; i = tables.index(t); tables = tables[:i] + copies + tables[i + 1:]
+    for t in [t for t in chairs if t.get("count", 1) > 1]:                # and "twelve chairs" written once: twelve chairs
+        k = things.index(t); copies = [dict(t, count=1, place=dict(t["place"])) for _ in range(int(t["count"]))]
+        things = things[:k] + copies + things[k + 1:]; i = chairs.index(t); chairs = chairs[:i] + copies + chairs[i + 1:]
+    n = len(tables)
+    if n > 1:                                                         # spread the tables over the open floor, in rows across the room's longer side
+        cols = max(1, min(n, round(math.sqrt(n * W / D)))); rows = math.ceil(n / cols)
+        for k, t in enumerate(sorted(tables, key=lambda t: (num(LB.pair(t["place"].get("at"))[1], 0.5), num(LB.pair(t["place"].get("at"))[0], 0.5)))):
+            r, c = divmod(k, cols); left = n - r * cols; cc = min(cols, left)
+            t["place"] = {**t["place"], "at": [round(0.22 + 0.56 * (c + 0.5) / cc, 3), round(0.25 + 0.5 * (r + 0.5) / rows, 3)]}
+    for k, t in enumerate(tables): t["seat_key"] = k + 1
+    cap = [1 if "desk" in t["name"].lower() else 4 if min(t["w"], t["d"]) >= 0.7 else 2 for t in tables]
+    seats = [(i, j) for j in range(max(cap)) for i in range(n) if j < cap[i]]                  # round the tables in turn: each gets its first chair before any gets a second
+    keep = []
+    for ch, (i, j) in zip(chairs, seats):
+        tb = tables[i]; u, v = (num(x, 0.5) for x in LB.pair(tb["place"].get("at")))
+        side = [(0, 1), (0, -1), (1, 0), (-1, 0)][j] if cap[i] != 2 else [(0, 1), (0, -1)][j]
+        gx = (tb["w"] / 2 + ch["d"] / 2 + 0.06) / W; gz = (tb["d"] / 2 + ch["d"] / 2 + 0.06) / D
+        ch["place"] = {**ch["place"], "at": [round(u + side[0] * gx, 3), round(v + side[1] * gz, 3)]}; ch["seat_of"] = tb["seat_key"]; keep.append(ch)
+    extra = [c for c in chairs if c not in keep]
+    if extra: say(f"{len(extra)} chairs more than {n} table{'s' if n > 1 else ''} seat{'' if n > 1 else 's'}: left out")
+    say(f"{len(keep)} chairs set round {n} table{'s' if n > 1 else ''}, facing them")
+    return [t for t in things if t not in extra]
+
+def face(placed):
+    """Each chair dealt to a table turned to face it (a yaw of 0 faces +z)."""
+    tables = {t["seat_key"]: t for t in placed if t.get("seat_key") and not t.get("gone") and "x" in t and t.get("copy", 0) == 0}
+    for t in placed:
+        tb = tables.get(t.get("seat_of"))
+        if tb is None or "x" not in t: continue
+        dx, dz = tb["x"] - t["x"], tb["z"] - t["z"]
+        if dx * dx + dz * dz > 1e-4: t["yaw"] = math.atan2(dx, dz)
+
 def place(req, raw, check=None):
     """The model's list (and its own check of it) -> the world. Two passes of the same solver: the list alone, then the list
     with what fill() adds; the list's own things come first both times, so the filler never moves them."""
     room, things, notes = read(raw); told(req, things, notes.append)
     things, pools, fullness = sense(things, check, notes, req)
     things = budget(req, things, raw.get("signature") if isinstance(raw.get("signature"), list) else [], notes)
+    things = seat(room, things, notes.append)
     placed, openings, dropped, n0 = solve(room, copy.deepcopy(things), [])
     extra = fill(req, room, placed, openings, pools, fullness, n0)
-    placed, openings, dropped, _ = solve(room, things + extra, notes)
+    placed, openings, dropped, _ = solve(room, things + extra, notes); face(placed)
     dropped = [d for d in dropped if not d.get("extra")]
     w = world(req, raw, room, placed, openings, dropped, notes); w["unsolved"] = check_(room, placed)
     if isinstance(raw.get("place"), str): w["place"] = raw["place"][:160]
