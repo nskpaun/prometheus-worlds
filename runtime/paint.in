@@ -5,3 +5,4 @@ timm
 plyfile
 scipy
 kornia
+mlx-vlm==0.8.0

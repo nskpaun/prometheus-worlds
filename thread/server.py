@@ -156,6 +156,13 @@ class H(SimpleHTTPRequestHandler):
                     env["WORLD_VIEWS"] = str(max(8, min(16, int(body.get("views", 12)))))
                     if body.get("setting") in ("indoor", "outdoor"): env["WORLD_SETTING"] = body["setting"]
                     else: env.pop("WORLD_SETTING", None)             # anything else leaves the choice to the layout model
+                elif body.get("type") == "blender":
+                    layout, style = (body.get("layout") or "").strip()[:600], (body.get("style") or "").strip()[:600]
+                    if not layout: return self.send_json({"error": "Describe the place"}, 400)
+                    jid = f"{slug(name)}-{secrets.token_hex(3)}"; args = ["blender", os.path.join(WORLDS, jid), name, layout] + ([style] if style else [])
+                    if body.get("plan") == "own": env["BLENDER_PLAN"] = "own"
+                    else: env.pop("BLENDER_PLAN", None)
+                    env.pop("WORLD_SETTING", None); env["WORLD_VIEWS"] = "12"
                 else: return self.send_json({"error": "unknown job type"}, 400)
                 job = {"state": "running", "id": jid, "name": name, "type": body["type"]}      # a fresh record per run
                 threading.Thread(target=run_job, args=(args, job, env), daemon=True).start()

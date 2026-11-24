@@ -111,10 +111,53 @@ function geometryFrom(tris, grey = 0.62) {
   g.computeVertexNormals(); return g;
 }
 
+// A world built in Blender, standing where a splat would (the same handful of members the rest of the viewer asks a splat for).
+// Its meshes keep their own textures; the light is baked apart: a lightmap on their second coordinates, or, on dense sculpted
+// meshes, light at the corners. Reflections come from a panorama Blender rendered where the visitor stands. All of it was written
+// at one exposure, 1.0 in the pictures standing for `light_max` times a lit white surface; the shader brings bright things back
+// under white softly. No lights of the viewer's own.
+const lightChunk = THREE.ShaderChunk.lights_fragment_maps
+  .replace("iblIrradiance += getIBLIrradiance( geometryNormal );", "")                 // the lightmap IS the light that falls on a surface: none from the panorama on top
+  + `\n#if defined( USE_ENVMAP ) && defined( RE_IndirectSpecular )
+  { vec3 lit = irradiance;                                                              // a reflection fades where little light reaches: no bright shine in a dark corner
+    #ifdef USE_COLOR
+      lit *= vColor.rgb;
+    #endif
+    iblRadiance *= clamp( dot( lit, vec3( 0.3333 ) ) / ( 0.35 * PI ), 0.04, 1.0 ); }\n#endif`;
+const softWhite = "gl_FragColor.rgb = gl_FragColor.rgb * ( 1.0 + gl_FragColor.rgb / 16.0 ) / ( 1.0 + gl_FragColor.rgb );";      // extended Reinhard: white at 4
+function bakedLook(m) {
+  m.onBeforeCompile = (sh) => {
+    sh.fragmentShader = sh.fragmentShader.replace("#include <lights_fragment_maps>", lightChunk).replace("#include <tonemapping_fragment>", softWhite);
+  };
+  m.customProgramCacheKey = () => "baked-look"; return m;
+}
+async function bakedModel(def) {
+  const tl = new THREE.TextureLoader(), held = [], K = def.light_max ?? 8;
+  const [g, envPic, ...lms] = await Promise.all([gltf.loadAsync(def.model).then((x) => x.scene), def.env ? tl.loadAsync(def.env) : null, ...(def.lightmaps ?? []).map((u) => tl.loadAsync(u))]);
+  const white = new THREE.DataTexture(new Uint8Array([255, 255, 255, 255]), 1, 1); white.needsUpdate = true; held.push(white);
+  let env = null;
+  if (envPic) { envPic.mapping = THREE.EquirectangularReflectionMapping; envPic.colorSpace = THREE.SRGBColorSpace; const pm = new THREE.PMREMGenerator(renderer); env = pm.fromEquirectangular(envPic).texture; pm.dispose(); envPic.dispose(); held.push(env); }
+  // no smaller copies of a lightmap: between its patches lies black, which would creep into them
+  for (const lm of lms) { lm.flipY = false; lm.channel = 1; lm.colorSpace = THREE.SRGBColorSpace; lm.generateMipmaps = false; lm.minFilter = THREE.LinearFilter; lm.needsUpdate = true; held.push(lm); }
+  const aniso = renderer.capabilities.getMaxAnisotropy();
+  g.traverse((o) => {
+    if (!o.isMesh) return;
+    const m = o.material, lm = o.geometry.attributes.uv1 && !m.vertexColors ? lms[(o.userData.lm ?? o.parent?.userData.lm ?? 1) - 1] : null;
+    for (const k of ["map", "roughnessMap", "metalnessMap", "emissiveMap", "normalMap"]) if (m[k]) { m[k].anisotropy = aniso; held.push(m[k]); }
+    if (!lms.length && !m.vertexColors) { o.material = new THREE.MeshBasicMaterial({ map: m.map, color: m.map ? 0xffffff : m.color, side: THREE.DoubleSide }); m.dispose(); held.push(o.geometry, o.material); return; }   // an older build: the light is in the picture itself
+    m.lightMap = lm ?? white; m.lightMapIntensity = K * Math.PI; m.envMap = env; m.envMapIntensity = K; m.side = THREE.DoubleSide;
+    if (m.emissiveIntensity > 1) m.emissiveIntensity = Math.min(m.emissiveIntensity, 3);
+    bakedLook(m); m.needsUpdate = true; held.push(o.geometry, m);
+  });
+  g.initialized = Promise.resolve(); g.dispose = () => held.forEach((x) => x?.dispose());
+  return g;
+}
+
 // One world, normalised: metres, y up, floor at y = 0, centred on its footprint. `outer` is what stitching moves.
 async function loadPart(def) {
   const outer = new THREE.Group(), inner = new THREE.Group(); outer.add(inner); scene.add(outer);
-  const splat = new SplatMesh({ url: def.ply }); inner.add(splat);
+  // a world built in Blender has no splat: its mesh carries a picture with the light baked in, shown as it is, with no lights
+  const splat = def.model ? await bakedModel(def) : new SplatMesh({ url: def.ply }); inner.add(splat);
   // a directly written world keeps its glossy discs, with the harmonics that make their shine move with the eye, in a second file: only they pay for harmonics
   const splat2 = def.ply2 ? new SplatMesh({ url: def.ply2 }) : null; if (splat2) inner.add(splat2);
   let vis, col;
@@ -544,9 +587,10 @@ await load(await refreshScenes(asked.get("scene")));
 
 // ---- New world: upload photos or send a prompt, then follow the job
 const dlg = $("#dlg"); let tab = "photos";
-function setTab(t) { tab = t; $("#tabPhotos").setAttribute("aria-selected", t === "photos"); $("#tabPrompt").setAttribute("aria-selected", t === "prompt"); $("#panePhotos").hidden = t !== "photos"; $("#panePrompt").hidden = t !== "prompt"; $("#err").textContent = ""; }
+const TABS = { photos: ["#tabPhotos", "#panePhotos"], prompt: ["#tabPrompt", "#panePrompt"], blender: ["#tabBlender", "#paneBlender"] };
+function setTab(t) { tab = t; for (const [k, [b, pane]] of Object.entries(TABS)) { $(b).setAttribute("aria-selected", k === t); $(pane).hidden = k !== t; } $("#err").textContent = ""; }
 $("#walk").addEventListener("change", setFly); setFly();
-$("#tabPhotos").addEventListener("click", () => setTab("photos")); $("#tabPrompt").addEventListener("click", () => setTab("prompt"));
+for (const [k, [b]] of Object.entries(TABS)) $(b).addEventListener("click", () => setTab(k));
 $("#new").addEventListener("click", () => { $("#err").textContent = ""; dlg.showModal(); });
 $("#dlgCancel").addEventListener("click", () => dlg.close());
 const post = async (url, body, raw) => { const r = await fetch(url, { method: "POST", body: raw ? body : JSON.stringify(body) }); const j = await r.json(); if (!r.ok) throw new Error(j.error ?? r.statusText); return j; };
@@ -559,6 +603,8 @@ $("#dlgGo").addEventListener("click", async () => {
       const id = "photos-" + Date.now().toString(36);
       for (const [i, f] of files.entries()) { $("#err").textContent = `Copying photo ${i + 1} of ${files.length}…`; await post(`/api/upload?job=${id}&name=${encodeURIComponent(f.name)}`, f, true); }
       await post("/api/jobs", { type: "photos", id, name: name || "My photos" });
+    } else if (tab === "blender") {
+      await post("/api/jobs", { type: "blender", name: name || "Blender world", layout: $("#blayout").value, style: $("#bstyle").value, plan: $("#bplan").value || undefined });
     } else {
       await post("/api/jobs", { type: "prompt", name: name || "Invented world", layout: $("#layout").value, style: $("#style").value, views: +$("#views").value, setting: $("#setting").value || undefined });
     }

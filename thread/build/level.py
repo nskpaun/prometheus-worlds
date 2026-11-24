@@ -16,6 +16,17 @@ def face_air(V, F):
     V = np.asarray(V, np.float64); a, b, c = V[F[:, 0]], V[F[:, 1]], V[F[:, 2]]; vol = float((a * np.cross(b, c)).sum() / 6)
     return F[:, ::-1].copy() if vol < 0 else F
 
+def opening_hints(b):
+    """The windows the layout planned (and kept the wall clear for), as the room builder takes them: without these it
+    cuts windows only by its own style rules, and a window the sentence asks for is not there. Doors stay the builder's
+    own business. Each wall has its own direction along it (arch_kit's frames)."""
+    W, _, D = (float(v) for v in b["room"]); out = []
+    for o in b.get("openings") or []:
+        if o.get("kind") != "window" or o.get("wall") not in ("back", "front", "left", "right"): continue
+        a, w = float(o["along"]), float(o["width"]); u = {"back": a, "front": W - a, "left": a, "right": D - a}[o["wall"]]; sill = float(o.get("sill") or 0.9)
+        out.append({"kind": "window", "wall": {"back": "z1", "front": "z0", "left": "x0", "right": "x1"}[o["wall"]], "u0": u - w / 2, "u1": u + w / 2, "v0": sill, "v1": sill + float(o["height"])})
+    return out
+
 _shell = {}
 def shell(world, b=None):
     """The room's geometry for this layout, built on the TRUE bounds of the made objects. Kept per process: the style
@@ -26,7 +37,7 @@ def shell(world, b=None):
     for i in range(len(b["objects"])):
         try: V = placed(world, i)["V"]; bounds[i] = (V.min(0), V.max(0))
         except OSError: pass
-    _shell[world] = arch.shell_geometry(b, bounds=bounds); return _shell[world]
+    _shell[world] = arch.shell_geometry(b, bounds=bounds, hints=opening_hints(b)); return _shell[world]
 
 COLOURS = {"red": (0, 0.85, 0.62), "crimson": (350, 0.85, 0.55), "scarlet": (5, 0.9, 0.7), "maroon": (345, 0.7, 0.35), "burgundy": (345, 0.7, 0.35), "orange": (28, 0.9, 0.85), "yellow": (50, 0.85, 0.88),
            "gold": (44, 0.75, 0.8), "cream": (48, 0.25, 0.9), "green": (130, 0.7, 0.45), "olive": (75, 0.6, 0.45), "teal": (178, 0.7, 0.5), "turquoise": (175, 0.7, 0.7), "cyan": (185, 0.7, 0.8), "blue": (220, 0.8, 0.6),

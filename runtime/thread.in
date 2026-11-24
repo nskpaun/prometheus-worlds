@@ -6,3 +6,4 @@ open3d
 trimesh
 xatlas
 pycolmap==4.2.1
+mcp-for-blender==2.3.1

@@ -61,6 +61,7 @@ dialog textarea{min-height:64px;resize:vertical} .row{display:flex;justify-conte
   <div class="tabs" role="tablist">
     <button role="tab" id="tabPhotos" aria-selected="true">From your photos</button>
     <button role="tab" id="tabPrompt" aria-selected="false">From a prompt</button>
+    <button role="tab" id="tabBlender" aria-selected="false">Built in Blender</button>
   </div>
   <label for="wname">Name</label><input type="text" id="wname" placeholder="My living room">
   <div id="panePhotos">
@@ -73,6 +74,12 @@ dialog textarea{min-height:64px;resize:vertical} .row{display:flex;justify-conte
     <label for="style">Look (optional)</label><textarea id="style" placeholder="dark oak and old stone, deep blue velvet, candlelight"></textarea>
     <label for="setting">Indoors or outdoors</label><select id="setting"><option value="" selected>Auto: decide from the description</option><option value="indoor">Indoors</option><option value="outdoor">Outdoors</option></select>
     <label for="views">Detail</label><select id="views"><option value="12" selected>Standard: about 20 minutes</option><option value="16">Full, finer paint and more sculpted shapes: about 30 minutes (outdoors about 40)</option></select>
+  </div>
+  <div id="paneBlender" hidden>
+    <p>Describe the place. It is planned, sculpted and given materials as a world from a prompt is, then put together in Blender: the world model on this Mac builds the furniture shape by shape through the Blender MCP, looks at each piece and mends it, and Blender bakes the light. The result is solid geometry with soft, true light and no splat. Needs Blender installed. A place outdoors is always built the quick way.</p>
+    <label for="blayout">The place</label><textarea id="blayout" placeholder="A cosy reading study in the evening: a wooden desk with a lamp under the window, a tall bookcase on the west wall, a leather armchair with a side table, a rug in the middle"></textarea>
+    <label for="bstyle">Look (optional)</label><textarea id="bstyle" placeholder="dark oak, green leather, brass, warm lamplight"></textarea>
+    <label for="bplan">Detail</label><select id="bplan"><option value="" selected>Rich, with sculpted things, materials and paint: about 20 minutes</option><option value="own">Quick, every thing built by the model from plain shapes: about 10 minutes</option></select>
   </div>
   <div id="err" role="alert"></div>
   <div class="row"><button id="dlgCancel">Cancel</button><button id="dlgGo" class="primary">Build world</button></div>

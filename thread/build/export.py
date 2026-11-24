@@ -15,6 +15,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from PIL import Image
 
 PX_ROOM, PX_OBJ, PX_SAID = 160, 320, 480          # texels per metre: the room's surfaces, the things in it, the things the sentence names
+if os.environ.get("EXPORT_PX"): PX_ROOM, PX_OBJ, PX_SAID = (int(v) for v in os.environ["EXPORT_PX"].split(","))      # a lighter export, where what reads it cannot show more (the Blender mode's one baked picture)
 MAX_TEX = 4096
 CHUNK = 2_000_000
 # what each of the paint's material classes (0 plain, 1 glass, 2 metal, 3 glow, 4 gloss) is as (roughness, metallic)
@@ -254,12 +255,13 @@ have not yet been tried in Unreal itself; the files were checked in Blender.
 def export(world, out=None, name=None):
     import assemble, light
     t00 = time.time(); world = os.path.abspath(world); out = out or f"{world}/export"; os.makedirs(out, exist_ok=True)
-    scene = json.load(open(f"{world}/scene.json")); name = re.sub(r"[^A-Za-z0-9_-]+", "_", name or os.path.basename(world)).strip("_") or "world"
+    scene = json.load(open(f"{world}/scene.json")) if os.path.exists(f"{world}/scene.json") else None        # none yet: a level exported before it is lit (the Blender mode), so no baked file
+    name = re.sub(r"[^A-Za-z0-9_-]+", "_", name or os.path.basename(world)).strip("_") or "world"
     for f in os.listdir(out):            # an earlier export of this world (perhaps under another name) goes
         if f.endswith((".glb", ".glb.part")): os.remove(os.path.join(out, f))
     stage("reading the level")
     Lv = assemble.level(world); M = Lv["M"]; pos, vec = frame(Lv["room"])
-    lit = Lit(world, scene) if os.path.exists(f"{world}/world.ply") else None
+    lit = Lit(world, scene) if scene and os.path.exists(f"{world}/world.ply") else None
     say(f"{len(Lv['pieces'])} pieces" + ("" if lit and lit.ok else "; no splat found: the baked file is left out"))
     G, B = GLB(), (GLB(unlit=True) if lit and lit.ok else None)
     groups = {}
@@ -309,7 +311,7 @@ def export(world, out=None, name=None):
             if p["name"].startswith("shell:"): parent = g.room_node
             else:
                 key = (id(g), p.get("obj"))
-                if key not in groups: groups[key] = g.node({"name": re.sub(r"[^A-Za-z0-9_ -]+", "", p["name"].split(":")[0]) or "thing"}, g.obj_node)
+                if key not in groups: groups[key] = g.node({"name": re.sub(r"[^A-Za-z0-9_ -]+", "", p["name"].split(":")[0]) or "thing", "extras": {"object": int(p["obj"])} if p.get("obj") is not None else {}}, g.obj_node)
                 parent = groups[key]
             if g is G: mi = g.material(nm, jpeg(img), rm, rough, metal, emit)
             else: mi = g.material(nm, jpeg(baked))

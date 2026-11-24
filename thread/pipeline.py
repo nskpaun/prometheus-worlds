@@ -1,6 +1,7 @@
 """End-to-end pipelines, run from this folder.
   pipeline.py photos WORLD_DIR "Name"                     WORLD_DIR/raw/* photos -> splat + mesh + collider
   pipeline.py prompt WORLD_DIR "Name" "SENTENCE" ["STYLE"]   a sentence -> a world
+  pipeline.py blender WORLD_DIR "Name" "SENTENCE" ["STYLE"]  a sentence -> a world built in Blender through the Blender MCP
 Each step prints a 'STAGE: ...' line. On success the world is added to scenes.json.
 A sentence is built by the direct method (build/, see docs/direct-method.md): a rich layout, real geometry for the room,
 materials and object paint from a style guide, traced light, and the splat written straight from all of it. Its Standard
@@ -238,7 +239,7 @@ def prompt_ring(d, name, layout, style):
 
 # ---------------------------------------------------------------- the direct method (build/)
 BUILD = os.path.join(HERE, "build")
-KEPT = ("layout.json", "layout.raw.json", "boxes.json", "shapes", "materials", "paint", "world.ply", "world_sh.ply", "collider.glb", "scene.json", "build.json", "steps.json", "export", "export.log")
+KEPT = ("layout.json", "layout.raw.json", "boxes.json", "shapes", "materials", "paint", "world.ply", "world_sh.ply", "collider.glb", "scene.json", "build.json", "steps.json", "export", "export.log", "blender", "scene.glb", "mesh.glb", "light0.png", "light1.png", "env.jpg")
 
 def world_entry(d, name, sentence, style):
     """The scenes.json entry of a world built by the direct method: what assemble.py wrote, with the files as addresses."""
@@ -250,14 +251,16 @@ def has_shapes():
     hy3d = os.environ.get("HY3D_DIR") or os.path.join(HERE, "../ext/Hunyuan3D-Swift")
     return os.path.exists(f"{hy3d}/.build/release/hy3d") and os.path.isdir(f"{hy3d}/weights/shape-small")
 
-def prompt_direct(d, name, sentence, style=""):
+def prompt_direct(d, name, sentence, style="", blender=False):
+    """blender: the same place, but put together and lit in Blender (see blender()): everything up to the paint is made as
+    here, then instead of the splat the level goes into Blender, where the world-plan model rebuilds the plain furniture."""
     os.makedirs(d, exist_ok=True); url(d); t00 = time.time()
     quality = "full" if int(os.environ.get("WORLD_VIEWS", "12")) >= 16 else "standard"
     env = {"WORLD_DIR": d, "WORLD_QUALITY": quality, "PYTHONDONTWRITEBYTECODE": "1"}
     sys.path.insert(0, BUILD); import where; q = where.QUALITY[quality]
     # steps.json: what this folder is a build of, and which steps are done. The same sentence, style and quality: go on after
     # the last finished step. Anything else: the folder's earlier build is cleared away first
-    mine = {"sentence": sentence, "style": style, "quality": quality}
+    mine = {"sentence": sentence, "style": style, "quality": quality, **({"blender": True} if blender else {})}
     def clear(keep=()):
         for f in KEPT:
             if f in keep: continue
@@ -274,22 +277,28 @@ def prompt_direct(d, name, sentence, style=""):
         rec["done"][key] = {"s": round(time.time() - t, 1), "peak_gb": mem.gb()}; save()
     b = lambda f: os.path.join(BUILD, f)
     save()
-    if rec.get("outdoor"): return prompt_ring(d, name, sentence, style or sentence)       # found to be outdoors on an earlier run
+    if rec.get("outdoor"): return blender_own(d, name, sentence, style) if blender else prompt_ring(d, name, sentence, style or sentence)       # found to be outdoors on an earlier run
+    asked = sentence
+    if blender and os.environ.get("BLENDER_ENRICH") != "0":                  # the sentence filled out first, so the plan has more to work from
+        stage("filling out the description")
+        step("enrich", [PY, "-B", os.path.join(HERE, "blender_world.py"), "enrich", d, sentence] + ([style] if style else []))
+        try: asked = sentence.rstrip(". ") + ".\n\nThe same place described in full (where the two differ, the first is right): " + open(f"{d}/blender/enriched.txt").read().strip()
+        except OSError: pass
     stage("planning the world")
-    step("layout", [PY, b("layout.py"), sentence, f"{d}/layout.json"])        # the world-plan model runs in its own process and leaves memory when done
+    step("layout", [PY, b("layout.py"), asked, f"{d}/layout.json"])        # the world-plan model runs in its own process and leaves memory when done
     step("plan", [PY, b("sculpt.py"), "plan", f"{d}/layout.json", str(q["sculpt_s"])])
     try: outdoor = json.load(open(f"{d}/boxes.json")).get("setting") == "outdoor"
     except (OSError, ValueError): outdoor = False
     if outdoor:         # only when the choice was left to the plan: with Indoors chosen the layout never answers outdoor
-        print("This is an outdoor place, which the direct method cannot build yet: building it with the ring-view method.", flush=True)
+        print("This is an outdoor place, which the direct method cannot build yet: " + ("the model plans and builds all of it in Blender." if blender else "building it with the ring-view method."), flush=True)
         clear(keep=("steps.json",)); rec.update(outdoor=True, done={}); save()
-        return prompt_ring(d, name, sentence, style or sentence)
+        return blender_own(d, name, sentence, style) if blender else prompt_ring(d, name, sentence, style or sentence)
     stage("sculpting the objects")
     step("pictures", [PY_IMG, b("sculpt.py"), "pictures"])
     step("meshes", [PY, b("sculpt.py"), "meshes"])
     step("place", [PY, b("sculpt.py"), "place"])
     stage("writing the style guide")
-    step("style", [PY, b("style.py"), sentence] + ([style] if style else []))
+    step("style", [PY, b("style.py"), asked] + ([style] if style else []))
     stage("making the materials")
     step("materials", [PY, b("materials.py"), str(q["swatches"])])
     stage("painting the objects")
@@ -300,12 +309,52 @@ def prompt_direct(d, name, sentence, style=""):
         step("paint_maps", [PY, b("paint.py"), "maps"])
         step("paint_map_pictures", [PY_IMG, b("klein.py"), f"{d}/paint/mapjobs.json"])
     step("paint_bake", [PY, b("paint.py"), "bake"])
-    stage("laying the splat and tracing the light")
-    step("assemble", [PY, b("assemble.py")])
-    register(world_entry(d, name, sentence, style))
+    if blender:
+        import blender_world as BW
+        app = BW.find_blender(); things = None
+        stage("building the furniture in Blender")
+        env["EXPORT_PX"] = os.environ.get("EXPORT_PX", "128,224,320")
+        step("level", [PY, b("export.py"), d, f"{d}/blender/level", "level"])             # the room, the sculpted things and the small plain ones, textured, with the lamps
+        step("blender", [PY, "-B", os.path.join(HERE, "blender_world.py"), "assemble", d])
+        stage("baking the light")
+        step("bake", BW.local_only([app, "-b", f"{d}/blender/scene.blend", "--python", os.path.join(HERE, "blender_finish.py"), "--", d, os.environ.get("BLENDER_PICTURE", "4096"), os.environ.get("BLENDER_SAMPLES", "64")]))
+        stage("writing the world")
+        step("files", [PY, "-B", os.path.join(HERE, "blender_export.py"), d])
+        register(blender_entry(d, name, sentence, style))
+    else:
+        stage("laying the splat and tracing the light")
+        step("assemble", [PY, b("assemble.py")])
+        register(world_entry(d, name, sentence, style))
     rec["total_s"] = round(sum(v["s"] for v in rec["done"].values()), 1); rec["peak_gb"] = max(v["peak_gb"] for v in rec["done"].values()); save()
     print(f"built in {(time.time() - t00) / 60:.1f} minutes ({rec['total_s'] / 60:.1f} of work over all runs); the largest process held {rec['peak_gb']} GB of memory", flush=True)
     stage("done")
+
+def blender_entry(d, name, sentence, style):
+    rel = url(d); s = json.load(open(f"{d}/scene.json")); things = json.load(open(f"{d}/blender/meta.json"))["things"]
+    return {"name": name, **s, **{k: f"{rel}/{s[k]}" for k in ("model", "env", "mesh", "collider") if k in s}, "lightmaps": [f"{rel}/{f}" for f in s.get("lightmaps", [])], "note": f"built in Blender, {things} things: {sentence[:50]}", "kind": "blender", "method": "blender", "style": style or sentence}
+
+def blender_own(d, name, sentence, style=""):
+    """A place the direct method cannot plan (outdoors): the model plans all of it itself and builds every thing in Blender
+    from simple shapes (blender_world.py), then the light is baked (blender_finish.py) and the world written (blender_export.py)."""
+    import blender_world as BW
+    os.makedirs(d, exist_ok=True); url(d); t = time.time(); env = {"PYTHONDONTWRITEBYTECODE": "1"}; app = BW.find_blender(); mem = Memory()
+    stage("building the place in Blender")
+    run([PY, "-B", "blender_world.py", "own", d, sentence] + ([style] if style else []), env, watch=mem)
+    stage("baking the light")
+    run(BW.local_only([app, "-b", f"{d}/blender/scene.blend", "--python", os.path.join(HERE, "blender_finish.py"), "--", d, os.environ.get("BLENDER_PICTURE", "4096"), os.environ.get("BLENDER_SAMPLES", "64")]), env, watch=mem)
+    stage("writing the world")
+    run([PY, "-B", "blender_export.py", d], env)
+    register(blender_entry(d, name, sentence, style))
+    print(f"built in {(time.time() - t) / 60:.1f} minutes; the largest process held {mem.gb()} GB of memory", flush=True)
+    stage("done")
+
+def blender(d, name, sentence, style=""):
+    """A sentence -> a place put together in Blender, through the Blender MCP. See docs/blender-method.md.
+    A room: planned, sculpted, given materials and painted as the direct method does it, then the level goes into Blender,
+    where the world-plan model rebuilds the plain furniture shape by shape and Cycles bakes the light. Outdoors, or without
+    the 3D shape model: the model plans and builds all of it itself (blender_own). BLENDER_PLAN=own asks for that."""
+    if os.environ.get("BLENDER_PLAN") == "own" or os.environ.get("WORLD_SETTING") == "outdoor" or not has_shapes(): return blender_own(d, name, sentence, style)
+    return prompt_direct(d, name, sentence, style, blender=True)
 
 def export(d, name):
     """A world built by the direct method as glTF files for Unreal Engine (build/export.py) -> WORLD_DIR/export/."""
@@ -321,4 +370,4 @@ def prompt(d, name, sentence, style=""):
     return prompt_ring(d, name, sentence, style or sentence)
 
 if __name__ == "__main__":
-    {"photos": photos, "prompt": prompt, "export": export}[sys.argv[1]](os.path.abspath(sys.argv[2]), *sys.argv[3:])
+    {"photos": photos, "prompt": prompt, "blender": blender, "export": export}[sys.argv[1]](os.path.abspath(sys.argv[2]), *sys.argv[3:])
