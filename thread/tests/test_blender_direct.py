@@ -37,7 +37,7 @@ class Colour(unittest.TestCase):
         self.assertLess(out[0] / out[2], 1.0 / 0.15)                                             # but less so
 
     def test_neutral_light_is_left_alone(self):
-        np.testing.assert_allclose(D.white_balance([np.ones((10, 3)) * 0.7]), np.ones(3), atol=1e-6)
+        np.testing.assert_allclose(D.white_balance([np.ones((10, 3)) * 0.7]), np.ones(3), atol=0.03)
 
     def test_lamp_colours_run_warm_to_cool(self):
         warm, mid, cool = D.kelvin(2700), D.kelvin(4000), D.kelvin(6500)

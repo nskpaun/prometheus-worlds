@@ -2,6 +2,7 @@
   pipeline.py photos WORLD_DIR "Name"                     WORLD_DIR/raw/* photos -> splat + mesh + collider
   pipeline.py prompt WORLD_DIR "Name" "SENTENCE" ["STYLE"]   a sentence -> a world
   pipeline.py blender WORLD_DIR "Name" "SENTENCE" ["STYLE"]  a sentence -> a world built in Blender through the Blender MCP
+  pipeline.py pbr WORLD_DIR "Name" "SENTENCE" ["STYLE"]      a sentence -> a world by the visuals-first method (WORLD_METHOD=pbr, the default for both)
 Each step prints a 'STAGE: ...' line. On success the world is added to scenes.json.
 A sentence is built by the direct method (build/, see docs/direct-method.md): a rich layout, real geometry for the room,
 materials and object paint from a style guide, traced light, and the splat written straight from all of it. Its Standard
@@ -319,7 +320,7 @@ def prompt_direct(d, name, sentence, style="", blender=False):
         stage("art direction: the sky, then a look at the place")
         step("direct", [PY, "-B", os.path.join(HERE, "blender_direct.py"), d, sentence])
         stage("baking the light")
-        step("bake", BW.local_only([app, "-b", f"{d}/blender/scene.blend", "--python", os.path.join(HERE, "blender_finish.py"), "--", d, os.environ.get("BLENDER_PICTURE", "4096"), os.environ.get("BLENDER_SAMPLES", "64")]))
+        step("bake", BW.local_only([app, "-b", f"{d}/blender/scene.blend", "--python-exit-code", "1", "--python", os.path.join(HERE, "blender_finish.py"), "--", d, os.environ.get("BLENDER_PICTURE", "4096"), os.environ.get("BLENDER_SAMPLES", "64")]))
         stage("writing the world")
         step("files", [PY, "-B", os.path.join(HERE, "blender_export.py"), d])
         register(blender_entry(d, name, sentence, style))
@@ -333,7 +334,9 @@ def prompt_direct(d, name, sentence, style="", blender=False):
 
 def blender_entry(d, name, sentence, style):
     rel = url(d); s = json.load(open(f"{d}/scene.json")); things = json.load(open(f"{d}/blender/meta.json"))["things"]
-    return {"name": name, **s, **{k: f"{rel}/{s[k]}" for k in ("model", "env", "sky_pano", "mesh", "collider") if k in s}, "lightmaps": [f"{rel}/{f}" for f in s.get("lightmaps", [])], "note": f"built in Blender, {things} things: {sentence[:50]}", "kind": "blender", "method": "blender", "style": style or sentence}
+    return {"name": name, **s, **{k: f"{rel}/{s[k]}" for k in ("model", "env", "sky_pano", "mesh", "collider") if k in s}, "lightmaps": [f"{rel}/{f}" for f in s.get("lightmaps", [])],
+            **({"probes": [{**p, "file": f"{rel}/{p['file']}"} for p in s["probes"]]} if s.get("probes") else {}),
+            "note": f"built in Blender, {things} things: {sentence[:50]}", "kind": "blender", "method": "blender", "style": style or sentence}
 
 def blender_own(d, name, sentence, style=""):
     """A place the direct method cannot plan (outdoors): the model plans all of it itself and builds every thing in Blender
@@ -357,16 +360,90 @@ def blender(d, name, sentence, style=""):
     A room: planned, sculpted, given materials and painted as the direct method does it, then the level goes into Blender,
     where the world-plan model rebuilds the plain furniture shape by shape and Cycles bakes the light. Outdoors, or without
     the 3D shape model: the model plans and builds all of it itself (blender_own). BLENDER_PLAN=own asks for that."""
+    if method() == "pbr" and os.environ.get("BLENDER_PLAN") != "own": return pbr(d, name, sentence, style)
     if os.environ.get("BLENDER_PLAN") == "own" or os.environ.get("WORLD_SETTING") == "outdoor" or not has_shapes(): return blender_own(d, name, sentence, style)
     return prompt_direct(d, name, sentence, style, blender=True)
+
+PBR = os.path.join(HERE, "pbr")
+PY_TRELLIS = os.path.abspath(os.path.join(HERE, "..", "ext", "trellis-mac", ".venv", "bin", "python"))
+PY_CHORD = os.path.abspath(os.path.join(HERE, "..", "ext", "ubisoft-laforge-chord", ".venv", "bin", "python"))
+
+def pbr(d, name, sentence, style=""):
+    """A sentence -> a world by the visuals-first method (docs/pbr-method.md; WORLD_METHOD=pbr), indoors or out:
+    plan (the layout, then the scene description), hero 3D models (TRELLIS.2), PBR materials (CHORD), the 360 degree HDR
+    sky, the scene compiled in Blender, art direction by Qwen3-VL, the light baked to HDR lightmaps and reflection probes,
+    the files written. Each large model runs in its own process and leaves memory before the next one loads. Running the
+    same command again goes on after the last finished step."""
+    import blender_world as BW
+    os.makedirs(d, exist_ok=True); url(d); t00 = time.time(); app = BW.find_blender()
+    env = {"WORLD_DIR": d, "PYTHONDONTWRITEBYTECODE": "1", "BLENDER_SKY": "0"}
+    mine = {"sentence": sentence, "style": style, "method": "pbr"}
+    try: rec = json.load(open(f"{d}/steps.json"))
+    except (OSError, ValueError): rec = {}
+    if {k: rec.get(k) for k in mine} != mine or not isinstance(rec.get("done"), dict):
+        for f in os.listdir(d):
+            p = os.path.join(d, f); shutil.rmtree(p) if os.path.isdir(p) else os.remove(p)
+        rec = {**mine, "done": {}}
+    def save(): json.dump(rec, open(f"{d}/steps.json.tmp", "w"), indent=1); os.replace(f"{d}/steps.json.tmp", f"{d}/steps.json")
+    def step(key, cmd, soft=False):
+        if key in rec["done"]: return
+        t = time.time(); mem = Memory(); ok = run(cmd, env, watch=mem, soft=soft)
+        if soft and ok is False: print(f"step {key} did not finish: going on without it", flush=True)
+        rec["done"][key] = {"s": round(time.time() - t, 1), "peak_gb": mem.gb()}; save()
+        if os.environ.get("PBR_UNTIL") == key: print(f"stopped after {key} (PBR_UNTIL)", flush=True); raise SystemExit(0)
+    save(); b = lambda f: os.path.join(BUILD, f); P = lambda f: os.path.join(PBR, f)
+    stage("filling out the description")
+    step("enrich", [PY, "-B", os.path.join(HERE, "blender_world.py"), "enrich", d, sentence] + ([style] if style else []))
+    asked = sentence
+    try: asked = sentence.rstrip(". ") + ".\n\nThe same place described in full (where the two differ, the first is right): " + open(f"{d}/blender/enriched.txt").read().strip()
+    except OSError: pass
+    outdoor = os.environ.get("WORLD_SETTING") == "outdoor"
+    if not outdoor and os.environ.get("WORLD_SETTING") != "indoor":
+        stage("planning the world")
+        step("layout", [PY, b("layout.py"), asked, f"{d}/layout.json"])
+        try: outdoor = json.load(open(f"{d}/layout.raw.json"))["raw"].get("setting") == "outdoor"
+        except (OSError, ValueError, KeyError): outdoor = False
+    elif not outdoor:
+        stage("planning the world"); step("layout", [PY, b("layout.py"), asked, f"{d}/layout.json"])
+    stage("planning the scene: outline, ceiling, materials, light, sky" if not outdoor else "planning the ground, what grows and what stands on it")
+    step("scene", [PY, "-B", P("plan.py"), "outdoor" if outdoor else "indoor", d, sentence])
+    stage("making the hero things in 3D")
+    step("hero_pictures", [PY_IMG, "-B", P("heroes.py"), "pictures", d])
+    if os.path.exists(PY_TRELLIS): step("hero_meshes", [PY_TRELLIS, "-B", P("heroes.py"), "meshes", d], soft=True)
+    else: print("TRELLIS.2 is not set up (ext/trellis-mac): hero things come from the library or are plain", flush=True)
+    step("hero_fallback", [PY, "-B", P("heroes.py"), "fallback", d])
+    stage("making the PBR materials")
+    step("material_pictures", [PY_IMG, "-B", P("materials.py"), "pictures", d])
+    if os.path.exists(PY_CHORD): step("material_maps", [PY_CHORD, "-B", P("materials.py"), "maps", d], soft=True)
+    else: print("CHORD is not set up (ext/ubisoft-laforge-chord): materials keep their colour pictures", flush=True)
+    step("material_paths", [PY, "-B", "-c", f"import sys; sys.path.insert(0, {PBR!r}); import materials, ir, os; s = ir.load({d!r} + '/pbr/scene_ir.json'); [setattr(m, 'albedo', m.albedo or (os.path.join({d!r}, 'pbr', 'materials', m.name + '_tile.png') if os.path.exists(os.path.join({d!r}, 'pbr', 'materials', m.name + '_tile.png')) else '')) for m in s.materials.values()]; ir.save(s, {d!r} + '/pbr/scene_ir.json')"])
+    stage("painting the sky")
+    step("sky", [PY_IMG, "-B", P("sky.py"), d], soft=True)
+    stage("building the scene in Blender")
+    step("compile", BW.local_only([app, "-b", "--factory-startup", "--python-exit-code", "1", "--python", P("compile_blend.py"), "--", d]))
+    stage("art direction: a look at the place")
+    step("direct", [PY, "-B", os.path.join(HERE, "blender_direct.py"), d, sentence])
+    stage("baking the light")
+    step("bake", BW.local_only([app, "-b", f"{d}/blender/scene.blend", "--python-exit-code", "1", "--python", os.path.join(HERE, "blender_finish.py"), "--", d, os.environ.get("BLENDER_PICTURE", "4096"), os.environ.get("BLENDER_SAMPLES", "128")]))
+    stage("writing the world")
+    step("files", [PY, "-B", os.path.join(HERE, "blender_export.py"), d])
+    e = blender_entry(d, name, sentence, style); e["method"] = "pbr"; register(e)
+    rec["total_s"] = round(sum(v["s"] for v in rec["done"].values()), 1); rec["peak_gb"] = max(v["peak_gb"] for v in rec["done"].values()); save()
+    print(f"built in {(time.time() - t00) / 60:.1f} minutes ({rec['total_s'] / 60:.1f} of work over all runs); the largest process held {rec['peak_gb']} GB of memory", flush=True)
+    stage("done")
 
 def export(d, name):
     """A world built by the direct method as glTF files for Unreal Engine (build/export.py) -> WORLD_DIR/export/."""
     if not os.path.exists(f"{d}/build.json"): raise SystemExit("Only worlds built from a sentence by the direct method can be exported for Unreal yet")
     run([PY, os.path.join(BUILD, "export.py"), d, f"{d}/export", name], {"PYTHONDONTWRITEBYTECODE": "1"})
 
+def method():
+    """WORLD_METHOD: pbr (the visuals-first method, the default), direct, ring, or blender (the Blender MCP route)."""
+    return os.environ.get("WORLD_METHOD", "pbr").strip().lower() or "pbr"
+
 def prompt(d, name, sentence, style=""):
-    asked = os.environ.get("WORLD_METHOD", "").strip().lower() == "ring"; outdoor = os.environ.get("WORLD_SETTING") == "outdoor"
+    if method() == "pbr": return pbr(d, name, sentence, style)
+    asked = method() == "ring"; outdoor = os.environ.get("WORLD_SETTING") == "outdoor"
     if not (asked or outdoor or not has_shapes()): return prompt_direct(d, name, sentence, style)
     if asked: pass
     elif outdoor: print("An outdoor place: built with the ring-view method (the direct method only builds rooms yet).", flush=True)
@@ -374,4 +451,4 @@ def prompt(d, name, sentence, style=""):
     return prompt_ring(d, name, sentence, style or sentence)
 
 if __name__ == "__main__":
-    {"photos": photos, "prompt": prompt, "blender": blender, "export": export}[sys.argv[1]](os.path.abspath(sys.argv[2]), *sys.argv[3:])
+    {"photos": photos, "prompt": prompt, "blender": blender, "pbr": pbr, "export": export}[sys.argv[1]](os.path.abspath(sys.argv[2]), *sys.argv[3:])

@@ -2,6 +2,7 @@ import * as THREE from "three";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 import { TransformControls } from "three/addons/controls/TransformControls.js";
 import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
+import { EXRLoader } from "three/addons/loaders/EXRLoader.js";
 import { EffectComposer } from "three/addons/postprocessing/EffectComposer.js";
 import { RenderPass } from "three/addons/postprocessing/RenderPass.js";
 import { GTAOPass } from "three/addons/postprocessing/GTAOPass.js";
@@ -169,32 +170,100 @@ const lightChunk = THREE.ShaderChunk.lights_fragment_maps
     #endif
     iblRadiance *= clamp( dot( lit, vec3( 0.3333 ) ) / ( 0.35 * PI ), 0.04, 1.0 ); }\n#endif`;
 const softWhite = "gl_FragColor.rgb = gl_FragColor.rgb * ( 1.0 + gl_FragColor.rgb / 16.0 ) / ( 1.0 + gl_FragColor.rgb );";      // extended Reinhard: white at 4
-function bakedLook(m) {
+// Visuals-first worlds (WORLD_METHOD=pbr) add, per material: a reflection probe looked up with box projection (the
+// panorama is treated as the room's walls, not as infinitely far, so reflections line up as you walk), and fog that
+// thins with height. `look` carries the uniforms: uProbePos, uBoxMin, uBoxMax (world), uFogBase, uFogHeight.
+const boxChunk = `
+uniform vec3 uProbePos; uniform vec3 uBoxMin; uniform vec3 uBoxMax; uniform float uBoxOn;
+varying vec3 vBoxWorldPos;
+vec3 boxProject( vec3 v ) {
+  if ( uBoxOn < 0.5 ) return v;
+  vec3 a = ( uBoxMax - vBoxWorldPos ) / v, b = ( uBoxMin - vBoxWorldPos ) / v;
+  vec3 far = vec3( v.x > 0.0 ? a.x : b.x, v.y > 0.0 ? a.y : b.y, v.z > 0.0 ? a.z : b.z );
+  float t = min( min( far.x, far.y ), far.z );
+  return normalize( vBoxWorldPos + v * t - uProbePos );
+}`;
+function bakedLook(m, look) {
   m.onBeforeCompile = (sh) => {
     sh.fragmentShader = sh.fragmentShader.replace("#include <lights_fragment_maps>", lightChunk);
     if (!film.on) sh.fragmentShader = sh.fragmentShader.replace("#include <tonemapping_fragment>", softWhite);   // with post, AgX does this at the end
+    if (look) {
+      Object.assign(sh.uniforms, look.uniforms);
+      sh.vertexShader = "varying vec3 vBoxWorldPos;\n" + sh.vertexShader.replace("#include <worldpos_vertex>", "#include <worldpos_vertex>\n  vBoxWorldPos = ( modelMatrix * vec4( transformed, 1.0 ) ).xyz;");
+      sh.fragmentShader = sh.fragmentShader.replace("#include <envmap_physical_pars_fragment>", boxChunk + "\n#include <envmap_physical_pars_fragment>")
+        .replace("#include <fog_pars_fragment>", "#include <fog_pars_fragment>\nuniform float uFogBase; uniform float uFogHeight;")
+        .replace("#include <fog_fragment>", `#ifdef USE_FOG
+          float fogFactor = ( 1.0 - exp( - fogDensity * vFogDepth ) ) * exp( - max( vBoxWorldPos.y - uFogBase, 0.0 ) / uFogHeight );
+          gl_FragColor.rgb = mix( gl_FragColor.rgb, fogColor, clamp( fogFactor, 0.0, 1.0 ) );
+        #endif`);
+      sh.fragmentShader = sh.fragmentShader.replace(/#include <envmap_physical_pars_fragment>/, (x) => THREE.ShaderChunk.envmap_physical_pars_fragment
+        .replace("reflectVec = transformDirectionByInverseViewMatrix( reflectVec, viewMatrix );", "reflectVec = transformDirectionByInverseViewMatrix( reflectVec, viewMatrix );\n\t\t\treflectVec = boxProject( reflectVec );"));
+    }
   };
-  m.customProgramCacheKey = () => (film.on ? "baked-look-hdr" : "baked-look"); m.userData.baked = true; return m;
+  m.customProgramCacheKey = () => (film.on ? "baked-look-hdr" : "baked-look") + (look ? "-box" : ""); m.userData.baked = true; return m;
+}
+const exrLoader = new EXRLoader();
+// the HDR worlds' probes: each an equirectangular EXR, prefiltered once, with where it was taken and the box it corrects against
+async function loadProbes(def, held) {
+  const out = [];
+  for (const p of def.probes ?? []) {
+    try {
+      const t = await exrLoader.loadAsync(p.url ?? p.file); t.mapping = THREE.EquirectangularReflectionMapping;
+      let mean = null;                                                       // the place's own light, on average, for the fog's brightness
+      if (t.image?.data) { const d = t.image.data, f = d instanceof Uint16Array ? THREE.DataUtils.fromHalfFloat : (x) => x; const c = [0, 0, 0]; let n = 0;
+        for (let i = 0; i + 3 < d.length; i += 4 * 61) { c[0] += f(d[i]); c[1] += f(d[i + 1]); c[2] += f(d[i + 2]); n++; } mean = c.map((x) => x / Math.max(n, 1)); }
+      const pm = new THREE.PMREMGenerator(renderer); const env = pm.fromEquirectangular(t).texture; pm.dispose(); t.dispose(); held.push(env);
+      out.push({ env, mean, at: new THREE.Vector3(...p.at), box: p.box ? new THREE.Box3(new THREE.Vector3(...p.box[0]), new THREE.Vector3(...p.box[1])) : null });
+    } catch (e) { console.warn("probe not loaded", p, e); }
+  }
+  return out;
 }
 async function bakedModel(def) {
   const tl = new THREE.TextureLoader(), held = [], K = def.light_max ?? 8;
-  const [g, envPic, skyPic, ...lms] = await Promise.all([gltf.loadAsync(def.model).then((x) => x.scene), def.env ? tl.loadAsync(def.env) : null, def.sky_pano ? tl.loadAsync(def.sky_pano).catch(() => null) : null, ...(def.lightmaps ?? []).map((u) => tl.loadAsync(u))]);
-  if (skyPic) { skyPic.mapping = THREE.EquirectangularReflectionMapping; skyPic.colorSpace = THREE.SRGBColorSpace; held.push(skyPic); g.userData.sky = { map: skyPic, k: def.sky_k ?? 1 }; }   // the painted sky, behind the windows
+  const pic = (u) => (/\.exr$/i.test(u) ? exrLoader.loadAsync(u) : tl.loadAsync(u));
+  const [g, envPic, skyPic, ...lms] = await Promise.all([gltf.loadAsync(def.model).then((x) => x.scene), def.env ? tl.loadAsync(def.env) : null, def.sky_pano ? pic(def.sky_pano).catch(() => null) : null, ...(def.lightmaps ?? []).map(pic)]);
+  if (skyPic) { skyPic.mapping = THREE.EquirectangularReflectionMapping; if (!skyPic.isDataTexture) skyPic.colorSpace = THREE.SRGBColorSpace; held.push(skyPic); g.userData.sky = { map: skyPic, k: def.hdr ? 1 : (def.sky_k ?? 1) }; }   // the painted sky, behind the windows
   const white = new THREE.DataTexture(new Uint8Array([255, 255, 255, 255]), 1, 1); white.needsUpdate = true; held.push(white);
   let env = null;
   if (envPic) { envPic.mapping = THREE.EquirectangularReflectionMapping; envPic.colorSpace = THREE.SRGBColorSpace; const pm = new THREE.PMREMGenerator(renderer); env = pm.fromEquirectangular(envPic).texture; pm.dispose(); envPic.dispose(); held.push(env); }
   // no smaller copies of a lightmap: between its patches lies black, which would creep into them
-  for (const lm of lms) { lm.flipY = false; lm.channel = 1; lm.colorSpace = THREE.SRGBColorSpace; lm.generateMipmaps = false; lm.minFilter = THREE.LinearFilter; lm.needsUpdate = true; held.push(lm); }
+  for (const lm of lms) {
+    lm.flipY = false; lm.channel = 1; lm.generateMipmaps = false; lm.minFilter = THREE.LinearFilter; held.push(lm);
+    if (lm.isDataTexture) { lm.colorSpace = THREE.LinearSRGBColorSpace; lm.offset.set(0, 1); lm.repeat.set(1, -1); }    // an EXR's rows come bottom first; glTF's coordinates count from the top
+    else lm.colorSpace = THREE.SRGBColorSpace;
+    lm.needsUpdate = true;
+  }
   const aniso = renderer.capabilities.getMaxAnisotropy();
+  const probes = def.hdr ? await loadProbes(def, held) : [];
+  const fog = Array.isArray(def.fog) && def.fog[0] > 0 ? def.fog : null;
+  g.userData.fog = fog; g.userData.probes = probes; const looks = [];
   g.traverse((o) => {
     if (!o.isMesh) return;
     const m = o.material, lm = o.geometry.attributes.uv1 && !m.vertexColors ? lms[(o.userData.lm ?? o.parent?.userData.lm ?? 1) - 1] : null;
     for (const k of ["map", "roughnessMap", "metalnessMap", "emissiveMap", "normalMap"]) if (m[k]) { m[k].anisotropy = aniso; held.push(m[k]); }
     if (!lms.length && !m.vertexColors) { o.material = new THREE.MeshBasicMaterial({ map: m.map, color: m.map ? 0xffffff : m.color, side: THREE.DoubleSide }); m.dispose(); held.push(o.geometry, o.material); return; }   // an older build: the light is in the picture itself
-    m.lightMap = lm ?? white; m.lightMapIntensity = K * Math.PI; m.envMap = env; m.envMapIntensity = K; m.side = THREE.DoubleSide;
-    if (m.emissiveIntensity > 1) m.emissiveIntensity = Math.min(m.emissiveIntensity, 3);
-    bakedLook(m); m.needsUpdate = true; held.push(o.geometry, m);
+    // the nearest probe to this piece (by the middle of its bounds), else the one panorama
+    let probe = null;
+    if (probes.length) { o.geometry.computeBoundingBox(); const c = o.geometry.boundingBox.getCenter(new THREE.Vector3()).applyMatrix4(o.matrixWorld); probe = probes.reduce((a, b) => (a.at.distanceTo(c) <= b.at.distanceTo(c) ? a : b)); }
+    if (def.hdr && m.emissive && (m.emissive.r + m.emissive.g + m.emissive.b) > 0.3 && !m.map) { m.emissiveIntensity = Math.max(m.emissiveIntensity, 1) * 6; m.side = THREE.DoubleSide; held.push(o.geometry, m); return; }   // a glowing bulb: as bright as it is, no lightmap
+    if (m.transmission > 0) { m.envMap = probe?.env ?? env; m.envMapIntensity = def.hdr ? 1 : K; m.side = THREE.DoubleSide; m.needsUpdate = true; held.push(o.geometry, m); return; }   // real glass: lit by the room's reflection, no lightmap
+    const hdrMap = def.hdr && lm && lm !== white;
+    m.lightMap = lm ?? white; m.lightMapIntensity = hdrMap ? Math.PI : K * Math.PI; m.envMap = probe?.env ?? env; m.envMapIntensity = def.hdr ? 1 : K; m.side = THREE.DoubleSide;
+    if (m.emissiveIntensity > 1) m.emissiveIntensity = Math.min(m.emissiveIntensity, def.hdr ? 40 : 3);
+    const look = def.hdr ? { uniforms: { uProbePos: { value: new THREE.Vector3() }, uBoxMin: { value: new THREE.Vector3() }, uBoxMax: { value: new THREE.Vector3() }, uBoxOn: { value: probe?.box ? 1 : 0 },
+      uFogBase: { value: 0 }, uFogHeight: { value: fog ? fog[1] : 4 } }, probe } : null;
+    if (look) looks.push(look);
+    bakedLook(m, look); m.needsUpdate = true; held.push(o.geometry, m);
   });
+  // the probes' places and boxes, in world space, kept up to date as the world is placed (and moved, when stitching)
+  g.userData.placeProbes = () => {
+    g.updateMatrixWorld(true); const M = g.matrixWorld;
+    for (const l of looks) {
+      if (!l.probe) continue; l.uniforms.uProbePos.value.copy(l.probe.at).applyMatrix4(M);
+      if (l.probe.box) { const b = l.probe.box.clone().applyMatrix4(M); l.uniforms.uBoxMin.value.copy(b.min); l.uniforms.uBoxMax.value.copy(b.max); }
+      l.uniforms.uFogBase.value = new THREE.Vector3().setFromMatrixPosition(M).y;
+    }
+  };
   g.initialized = Promise.resolve(); g.dispose = () => held.forEach((x) => x?.dispose());
   return g;
 }
@@ -342,7 +411,7 @@ function clearWorld() {
   for (const p of S.parts) disposePart(p);
   for (const b of S.balls) { scene.remove(b.mesh); b.mesh.material.dispose(); }      // the sphere geometry is shared, keep it
   S.phys?.free();                                                                   // Rapier's memory is not garbage collected
-  film.set(false); scene.background = null; clearEdits(); S.parts = []; S.balls = []; S.phys = null; S.net = null; S.world = null; S.ready = false;
+  film.set(false); scene.background = null; scene.fog = null; clearEdits(); S.parts = []; S.balls = []; S.phys = null; S.net = null; S.world = null; S.ready = false;
   S.wind = null; S.bound = null; S.zones = null; S.sky = false; tour.path = null; S.emitters = 0; sky.visible = false; orbit.maxDistance = Infinity; audio.detachAll();
 }
 
@@ -398,6 +467,10 @@ async function load(def) {
   }
   const painted = S.parts.find((p) => p.splat.userData?.sky)?.splat.userData.sky;
   S.painted = painted ?? null; if (painted) { S.sky = false; scene.backgroundIntensity = painted.k; }
+  for (const p of S.parts) p.splat.userData?.placeProbes?.();
+  const fp = S.parts.find((p) => p.splat.userData?.fog)?.splat.userData;           // height fog, as bright as the place's own light, tinted as planned
+  if (fp) { const f = fp.fog, m = fp.probes?.[0]?.mean ?? [0.3, 0.3, 0.3], c = new THREE.Color().setRGB(f[2], f[3], f[4], THREE.SRGBColorSpace), lum = 0.2126 * c.r + 0.7152 * c.g + 0.0722 * c.b || 1, amb = (m[0] + m[1] + m[2]) / 3;
+    scene.fog = new THREE.FogExp2(c.multiplyScalar(amb / lum), f[0]); } else scene.fog = null;
   // start where the first part's photos were taken (or its first generated view)
   const p0 = S.parts[0], d0 = p0.def;
   const c = new THREE.Vector3(...(d0.eye ?? d0.center)).applyMatrix4(p0.inner.matrixWorld);
@@ -502,6 +575,7 @@ renderer.setAnimationLoop(() => {
   orbit.update();
   back.position.copy(camera.position); back.scale.setScalar(camera.far * 0.5);
   sky.position.copy(camera.position); sky.scale.setScalar(camera.far * 0.5);
+  if (E.on) for (const p of E.parts.values()) p.splat?.userData?.placeProbes?.();   // the stitch editor moves worlds: their probes go with them
   film.render(dt);
   if (audio.running) {
     if (now - clock.windAt > 100) { clock.windAt = now; audio.setWind(w); }      // ten times a second is plenty for a slow curve

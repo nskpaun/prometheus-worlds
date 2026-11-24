@@ -4,6 +4,7 @@
 # Safe to run again: each step skips what is already done. The app runs this on first launch.
 #   ./setup.sh             everything
 #   ./setup.sh --no-shapes skip the 3D shape model (sentences are then built by the earlier ring method, objects stay boxes)
+#   ./setup.sh --no-pbr    skip the visuals-first method's models (art director, sky, materials, hero 3D, prop library)
 #   ./setup.sh --check     exit 0 if setup is complete and up to date, 1 if not (changes nothing)
 #   PROMETHEUS_ADOPT=DIR[:DIR] ./setup.sh   take models already on this Mac from other Hugging Face caches (.../hub folders)
 #                          instead of downloading them again: each file is checked against its checksum, then linked in
@@ -22,6 +23,18 @@ ZIMG_REPO="Tongyi-MAI/Z-Image-Turbo"; ZIMG_REV="f332072aa78be7aecdf3ee76d5c24708
 ZIMG_FILES=('vae/*.safetensors' 'vae/*.json' 'transformer/*.safetensors' 'transformer/*.json' 'text_encoder/*.safetensors' 'text_encoder/*.json' 'tokenizer/*')
 KLEIN_FILES=('vae/*' 'transformer/*' 'text_encoder/*' 'tokenizer/*' LICENSE.md)                       # what mflux reads; leaves out a second 7.75 GB copy of the transformer
 HY_GIT="https://github.com/ZimengXiong/Hunyuan3D-Swift"; HY_REV="292331f4d26ddb80b9dcea6bcb5629ff82f12b82"
+# the visuals-first method (thread/pbr, docs/pbr-method.md)
+VL_REPO="mlx-community/Qwen3-VL-32B-Instruct-4bit"; VL_REV="6e5644d3ea4b953b5221ffd02339bf897041038a"                 # the art director
+KBASE_REPO="black-forest-labs/FLUX.2-klein-base-9B"; KBASE_REV="32773329fbe7e81a90ef971740e8ba4b0364ecf3"           # the revision mflux 0.24.0 loads; the 360 degree sky, with:
+PANO_REPO="crafiq/flux-2-klein-9b-360-panorama-lora"; PANO_REV="494ac687accc8b1e8b4e2f78c49e2dfc67c1c009"
+CHORD_GIT="https://github.com/ubisoft/ubisoft-laforge-chord"; CHORD_REV="675a29d1fee5e1b256833bd4edabd619be43d0c7"   # PBR materials
+CHORD_REPO="Ubisoft/ubisoft-laforge-chord"; CHORD_WREV="2b61fc12f316b4692c2a79651e03340427450735"
+SD21_REPO="sd2-community/stable-diffusion-2-1-base"; SD21_REV="4e63672c03103b6c636b8fb4119ba982469b2955"            # CHORD's base: its configs only
+TRELLIS_GIT="https://github.com/shivampkumar/trellis-mac"; TRELLIS_REV="d58628f4f5b9c3de8274cb110074154f4b31cef2"   # hero 3D models
+TRELLIS_REPO="microsoft/TRELLIS.2-4B"; TRELLIS_WREV="af44b45f2e35a493886929c6d786e563ec68364d"
+DINO_REPO="facebook/dinov3-vitl16-pretrain-lvd1689m"; DINO_REV="ea8dc2863c51be0a264bab82070e3e8836b02d51"
+TRELLIS1_REPO="microsoft/TRELLIS-image-large"; TRELLIS1_REV="25e0d31ffbebe4b5a97464dd851910efc3002d96"
+EIGEN_URL="https://gitlab.com/libeigen/eigen/-/archive/3.4.0/eigen-3.4.0.tar.gz"; EIGEN_SHA="8586084f71f9bde545ee7fa6d00288b264a2b7ac3607b974e54d13e7162c1c72"   # headers only, for the texture baker
 HY_REPO="zimengxiong/hunyuan3d-mlx-shape-small"; HY_WREV="b7536809d38ad13fe6a9b7769a41fd5d42e520df"
 SHARP_GIT="https://github.com/apple/ml-sharp"; SHARP_REV="aed6527499ef91cba3b54c18d49a870f25947190"      # one photo in, a splat out: what worlds from photos are made of
 SHARP_URL="https://ml-site.cdn-apple.com/models/sharp/sharp_2572gikvuh.pt"; SHARP_SHA="94211a75198c47f61fca7d739ba08a215418d8d398d48fddf023baccc24f073d"
@@ -145,6 +158,41 @@ if [[ "$1" != "--no-shapes" ]]; then
     fi
     [ -f $H/weights/shape-small/model.fp16.safetensors ] || hf $HY_REPO $HY_WREV $H/weights/shape-small
   ) || print "  WARNING: the shape model could not be set up. Sentences are built by the earlier ring method until it is, where objects stay painted boxes. Run ./setup.sh again to retry."
+fi
+
+if [[ "$1" != "--no-pbr" && "$2" != "--no-pbr" ]]; then
+  step "Art director (Qwen3-VL 32B, about 18 GB)"
+  model $VL_REPO $VL_REV
+  step "Sky panorama model (FLUX.2 Klein base 9B and a 360 degree LoRA, about 18 GB; needs access granted on Hugging Face)"
+  ( model $KBASE_REPO $KBASE_REV && model $PANO_REPO $PANO_REV ) || print "  WARNING: the sky model could not be fetched (ask for access at huggingface.co/$KBASE_REPO, then sign in with: spike/.venv/bin/hf auth login). Skies stay plain until it is."
+  step "CC0 prop library (Poly Haven, about 4 GB)"
+  thread/.venv/bin/python -B thread/pbr/kitbash.py fetch ext/cc0-kitbash || print "  WARNING: the prop library could not be fetched. Run ./setup.sh again to retry."
+  step "PBR material model (CHORD, about 4 GB; needs access granted on Hugging Face)"
+  ( set -e
+    C=ext/ubisoft-laforge-chord
+    if [[ "$(git -C $C rev-parse HEAD 2>/dev/null)" != $CHORD_REV ]]; then rm -rf $C && git clone --quiet $CHORD_GIT $C && git -C $C checkout --quiet $CHORD_REV; fi
+    sed -i '' 's/"cuda" if torch.cuda.is_available() else "cpu"/"mps" if torch.backends.mps.is_available() else "cpu"/' $C/chord/module/stable_diffusion.py $C/chord/module/base.py
+    sed -i '' 's#model_key = "RedbeardNZ/stable-diffusion-2-1-base"#model_key = "sd2-community/stable-diffusion-2-1-base"#' $C/chord/module/stable_diffusion.py
+    [ -x $C/.venv/bin/python ] || .runtime/python/bin/python3 -m venv $C/.venv
+    $C/.venv/bin/pip install --quiet torch torchvision && $C/.venv/bin/pip install --quiet -r $C/requirements.txt
+    model $SD21_REPO $SD21_REV "*.json" "*.txt" && model $CHORD_REPO $CHORD_WREV
+  ) || print "  WARNING: the material model could not be set up (ask for access at huggingface.co/$CHORD_REPO). Materials keep their colour pictures until it is."
+  step "Hero 3D model (TRELLIS.2 4B for Apple Silicon, about 16 GB)"
+  ( set -e
+    T=ext/trellis-mac
+    if [[ "$(git -C $T rev-parse HEAD 2>/dev/null)" != $TRELLIS_REV ]]; then rm -rf $T && git clone --quiet $TRELLIS_GIT $T && git -C $T checkout --quiet $TRELLIS_REV; fi
+    xcrun -sdk macosx metal --version >/dev/null 2>&1 || xcodebuild -downloadComponent MetalToolchain
+    if [ ! -x $T/.venv/bin/python ]; then
+      PATH="$PWD/.runtime/python/bin:$PATH" SKIP_METAL=1 bash $T/setup.sh        # the environment, TRELLIS.2 and its patches; the Metal parts below
+      # PyTorch's headers need C++20 with this Xcode, and the texture baker needs Eigen's headers
+      sed -i '' 's/-std=c++17/-std=c++20/g' $T/deps/mtlbvh/setup.py $T/deps/mtldiffrast/setup.py $T/deps/mtlmesh/setup.py $T/deps/mtlgemm/setup.py $T/deps/trellis2-apple/o-voxel/setup.py
+      [ -d ext/eigen-3.4.0 ] || { fetch "$EIGEN_URL" .runtime/eigen.tar.gz $EIGEN_SHA && tar xzf .runtime/eigen.tar.gz -C ext && rm .runtime/eigen.tar.gz; }
+      for p in mtlbvh mtldiffrast mtlmesh mtlgemm trellis2-apple/o-voxel; do
+        ( cd $T && MACOSX_DEPLOYMENT_TARGET=12.0 CPLUS_INCLUDE_PATH="$PWD/../eigen-3.4.0" VIRTUAL_ENV="$PWD/.venv" .venv/bin/python -m pip install --quiet --no-build-isolation deps/$p ) || print "  (the Metal part $p did not build: TRELLIS.2 uses its slower fallback)"
+      done
+    fi
+    model $TRELLIS_REPO $TRELLIS_WREV && model $DINO_REPO $DINO_REV && model $TRELLIS1_REPO $TRELLIS1_REV "ckpts/ss_dec_conv3d_16l8_fp16.*"      # TRELLIS.2 borrows the first TRELLIS's structure decoder
+  ) || print "  WARNING: the hero 3D model could not be set up. Hero things come from the prop library or are plain until it is."
 fi
 
 mkdir -p .setup && stamp > .setup/done

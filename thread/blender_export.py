@@ -27,6 +27,14 @@ def main(d):
     for k in range(int(meta.get("lightmaps", 1))):
         Image.fromarray(calm(np.load(os.path.join(w, f"light{k}.npy")))).save(os.path.join(d, f"light{k}.png"), optimize=False, compress_level=4); maps.append(f"light{k}.png")
     Image.fromarray(np.load(os.path.join(w, "env.npy"))).save(os.path.join(d, "env.jpg"), quality=92)
+    import shutil
+    hdr = bool(meta.get("hdr"))
+    if hdr:                                                                   # visuals-first worlds: HDR lightmaps, probes and sky as EXR
+        maps = []
+        for k in range(int(meta.get("lightmaps", 1))):
+            shutil.copyfile(os.path.join(w, f"light{k}.exr"), os.path.join(d, f"light{k}.exr")); maps.append(f"light{k}.exr")
+        for p in meta.get("probes") or []: shutil.copyfile(os.path.join(w, p["file"]), os.path.join(d, p["file"]))
+        if os.path.exists(os.path.join(w, "sky.exr")): shutil.copyfile(os.path.join(w, "sky.exr"), os.path.join(d, "sky.exr"))
     sky = os.path.join(w, "sky.npy")
     if meta.get("sky_k") and os.path.exists(sky): Image.fromarray(np.load(sky)).save(os.path.join(d, "sky.jpg"), quality=90)
     V, T = y_up(g["PV"]), g["PT"]; flat = V[T].reshape(-1, 3); col = (np.clip(g["PC"], 0, 1) * 255).astype(np.uint8)
@@ -37,6 +45,13 @@ def main(d):
     scene = {"model": "scene.glb", "lightmaps": maps, "env": "env.jpg", "light_max": meta.get("light_max", 8.0), "mesh": "mesh.glb", "collider": "collider.glb", "up": [0, 1, 0], "floor": 0.0, "metre": 1.0,
              "centre": [0.0, 0.0] if room else [float((lo[0] + hi[0]) / 2), float(-(lo[1] + hi[1]) / 2)], "eye": [e[0], e[2], -e[1]], "forward": [f[0], f[2], -f[1]],
              "backdrop": meta["backdrop"], **({"sky_pano": "sky.jpg", "sky_k": meta["sky_k"]} if meta.get("sky_k") and os.path.exists(sky) else {}), "setting": meta["setting"], **({"room": [room[0], room[2], room[1]]} if room else {})}
+    if hdr:
+        y = lambda p: [p[0], p[2], -p[1]]
+        rb = meta.get("room_box"); H = (room or [0, 0, 3])[2]
+        box_ = [[rb[0], 0.0, -rb[3]], [rb[2], H + 0.5, -rb[1]]] if rb else None
+        scene.update({"hdr": True, "probes": [{"at": y(p["at"]), "file": p["file"], "box": box_} for p in meta.get("probes") or []],
+                      **({"sky_pano": "sky.exr"} if os.path.exists(os.path.join(d, "sky.exr")) else {}), "fog": meta.get("fog")})
+        scene.pop("sky_k", None)
     with open(os.path.join(d, "scene.json"), "w") as fh: json.dump(scene, fh, indent=1)
     print(f"{len(T)} faces; scene.glb {os.path.getsize(os.path.join(d, 'scene.glb')) / 1e6:.1f} MB, {len(maps)} lightmaps", flush=True)
 

@@ -57,7 +57,9 @@ def drop_unseen(o, room, t=0.12):
     """Take the outer faces of the room's shell off the mesh: nobody sees them, and they would take half the picture."""
     if not room: return
     W, D, H = room; bm = bmesh.new(); bm.from_mesh(o.data); e = 0.005
-    gone = [f for f in bm.faces if (c := f.calc_center_median()) and (abs(c.x) > W / 2 + t - e or abs(c.y) > D / 2 + t - e or c.z < -e or c.z > H + e)]
+    x0, y0, x1, y1 = bpy.context.scene.get("room_box") or (-W / 2, -D / 2, W / 2, D / 2)
+    top = H + float(bpy.context.scene.get("roof_rise", 0.0))
+    gone = [f for f in bm.faces if (c := f.calc_center_median()) and (c.x < x0 - t + e or c.x > x1 + t - e or c.y < y0 - t + e or c.y > y1 + t - e or c.z < -e or c.z > top + e)]
     bmesh.ops.delete(bm, geom=gone, context="FACES"); bm.to_mesh(o.data); bm.free()
 
 def only(objs):
@@ -182,9 +184,39 @@ def panorama(eye, path, samples=48, width=1024):
     rd = sc.render; rd.resolution_x, rd.resolution_y, rd.resolution_percentage = width, width // 2, 100; rd.image_settings.file_format = "OPEN_EXR"; rd.filepath = path; sc.cycles.samples = samples
     bpy.ops.render.render(write_still=True); img = bpy.data.images.load(path); px = pixels(img)[..., :3].copy(); bpy.data.images.remove(img); bpy.data.objects.remove(cam); return px
 
+def write_exr(path, a, flip=True):
+    """An H x W x 3 float array (row 0 at the top when flip, else Blender's bottom-up order) -> a half-float EXR."""
+    a = np.ascontiguousarray(a[::-1] if flip else a, np.float32); H, W = a.shape[:2]
+    img = bpy.data.images.new(os.path.basename(path), W, H, alpha=False, float_buffer=True)
+    img.pixels.foreach_set(np.concatenate([a, np.ones((H, W, 1), np.float32)], -1).ravel())
+    sc = bpy.context.scene; s = sc.render.image_settings; old = (s.file_format, s.color_depth, s.exr_codec)
+    s.file_format = "OPEN_EXR"; s.color_depth = "16"; s.exr_codec = "ZIP"
+    img.save_render(path, scene=sc); s.file_format, s.color_depth, s.exr_codec = old; bpy.data.images.remove(img)
+
+def calm_hdr(x):
+    """The path tracer's speckle out of a float lightmap: each texel the median of its 3 x 3 neighbourhood, where that
+    neighbourhood is lit (the black between patches is left alone). Blender's Python has numpy but not scipy."""
+    lum = x @ LUM; H, W = lum.shape; pad = np.pad(x, ((1, 1), (1, 1), (0, 0)), mode="edge")
+    stack = np.stack([pad[i:i + H, j:j + W] for i in range(3) for j in range(3)], 0)
+    med = np.median(stack, axis=0); return np.where((lum > 0)[..., None], med, x)
+
+def probe_points(room, lo, hi, eye):
+    """Where the reflection probes go: the start, then the middles of the four quarters of the floor (a small room
+    gets two), all at eye height; outdoors, the start and the middle."""
+    pts = [list(eye)]
+    if room:
+        W, D = hi.x - lo.x, hi.y - lo.y; n = 4 if W * D > 30 else 2
+        cand = [(lo.x + W * fx, lo.y + D * fy) for fx, fy in ((0.28, 0.28), (0.72, 0.72), (0.72, 0.28), (0.28, 0.72))][:n]
+    else: cand = [(0.0, 0.0)]
+    for x, y in cand:
+        if all(math.hypot(x - p[0], y - p[1]) > 1.2 for p in pts): pts.append([x, y, 1.5])
+    return pts[:4]
+
 def stand(things, room, lo, hi):
     """Where to put the visitor: a clear spot of floor far from the middle of the things, looking at them."""
-    if room: x0, x1, y0, y1 = -room[0] / 2 + 0.5, room[0] / 2 - 0.5, -room[1] / 2 + 0.5, room[1] / 2 - 0.5
+    rb = bpy.context.scene.get("room_box")
+    if room and rb: x0, x1, y0, y1 = rb[0] + 0.5, rb[2] - 0.5, rb[1] + 0.5, rb[3] - 0.5
+    elif room: x0, x1, y0, y1 = -room[0] / 2 + 0.5, room[0] / 2 - 0.5, -room[1] / 2 + 0.5, room[1] / 2 - 0.5
     else:                                                    # outdoors: round the things, not out at the edge of the ground
         x0, x1, y0, y1 = (min(a.x for a, b in things) - 2, max(b.x for a, b in things) + 2, min(a.y for a, b in things) - 2, max(b.y for a, b in things) + 2) if things else (-3, 3, -3, 3)
         x0, x1, y0, y1 = max(x0, lo.x + 0.5), min(x1, hi.x - 0.5), max(y0, lo.y + 0.5), min(y1, hi.y - 0.5)
@@ -211,9 +243,13 @@ def plain_colour(o):
         return [float(v) for v in m.diffuse_color[:3]]
     return [0.6, 0.6, 0.6]
 
-def arrays(o):
-    """An object's triangles as it stands in the world: corner positions and triangles."""
+def arrays(o, most=None):
+    """An object's triangles as it stands in the world: corner positions and triangles. most: simplified to about that many
+    faces first (the collider and the plain copy need the shape, not every face of it)."""
+    dm = None
+    if most and len(o.data.polygons) > most: dm = o.modifiers.new("lighter", "DECIMATE"); dm.ratio = most / len(o.data.polygons)
     dg = bpy.context.evaluated_depsgraph_get(); me = bpy.data.meshes.new_from_object(o.evaluated_get(dg)); me.transform(o.matrix_world); me.calc_loop_triangles()
+    if dm: o.modifiers.remove(dm)
     co = np.empty(len(me.vertices) * 3, np.float32); me.vertices.foreach_get("co", co); tri = np.empty(len(me.loop_triangles) * 3, np.int32); me.loop_triangles.foreach_get("vertices", tri)
     bpy.data.meshes.remove(me); return co.reshape(-1, 3), tri.reshape(-1, 3)
 
@@ -227,8 +263,10 @@ def main(d, size=4096, samples=64):
         if o.parent is None and not o.get("room_part") and o.type in ("MESH", "EMPTY"):
             fam = [o] + list(o.children_recursive); pts = [p.matrix_world @ Vector(c) for p in fam if p.type == "MESH" for c in p.bound_box]
             if pts: tops.append((Vector([min(p[i] for p in pts) for i in range(3)]), Vector([max(p[i] for p in pts) for i in range(3)])))
-    solid = flat_copy(meshes, "solid"); CV, CT = arrays(solid); bpy.data.objects.remove(solid)
+    solid = flat_copy(meshes, "solid"); CV, CT = arrays(solid, most=150000 if sc.get("pbr") else None); bpy.data.objects.remove(solid)
     # 1. what has no texture of its own: joined (the room's part and the rest apart), its colour and roughness baked to pictures
+    glassy = [o for o in seen if o.get("glow") or any(sl.material and sl.material.get("glass") for sl in o.material_slots)]   # real glass and glowing bulbs: exported as they are, no lightmap
+    seen = [o for o in seen if o not in glassy]
     keep = [o for o in seen if has_look(o)]; bare = [o for o in seen if o not in keep]; show = list(keep)
     for name, objs in (("built_room", [o for o in bare if o.get("room_part")]), ("built_things", [o for o in bare if not o.get("room_part")])):
         if not objs: continue
@@ -249,6 +287,9 @@ def main(d, size=4096, samples=64):
     gain = DIR.exposure(lum, hour, float(sc.get("exposure_ev", 0.0))) if len(lum) else 1.0    # by day a mid-toned surface comes out a middle grey; at dusk and night the lamps' pools set it
     wb = DIR.white_balance([lm[..., :3][lm[..., 3] > 0.5] for lm in lms[:1]] + [corner_light(o)[:, :3] for o in dense])    # as a camera balanced to the room's own light: most of a lamp's colour cast taken out
     for k, lm in enumerate(lms): np.save(os.path.join(work, f"light{k}.npy"), encode(lm[::-1, :, :3] * wb, gain))   # Blender's pictures start at the bottom row
+    hdr = bool(sc.get("pbr"))
+    if hdr:                                                                  # the visuals-first worlds: the lightmaps in full range, as half-float EXR
+        for k, lm in enumerate(lms): write_exr(os.path.join(work, f"light{k}.exr"), calm_hdr(np.nan_to_num(lm[:, :, :3]).clip(0, None) * wb * gain), flip=False)
     for o in dense:
         a = o.data.color_attributes["Col"]; v = corner_light(o); v[:, :3] = (np.nan_to_num(v[:, :3]).clip(0, None) * wb * (gain / LM_MAX)).clip(0, 1); v[:, 3] = 1; a.data.foreach_set("color", v.ravel())
     if os.environ.get("BLENDER_RELIEF") != "0":
@@ -257,7 +298,16 @@ def main(d, size=4096, samples=64):
     # 3. where to stand, and what is seen from there
     allV = np.concatenate([np.array([o.matrix_world @ Vector(c) for c in o.bound_box], np.float32) for o in show]); lo, hi = Vector(allV.min(0).tolist()), Vector(allV.max(0).tolist())
     eye, fwd = stand(tops, room, lo, hi)
+    if sc.get("start"): eye = [float(v) for v in sc["start"]]; fwd = list((Vector((0, 0, 1.0)) - Vector(eye)).normalized()) if Vector(eye).length > 0.1 else [0.0, 1.0, -0.12]
     pano = panorama(eye, os.path.join(work, "pano.exr")); np.save(os.path.join(work, "env.npy"), encode(pano[::-1] * wb, gain)); print(f"panorama in {time.time() - t:.0f} s", flush=True); t = time.time()
+    probes = []
+    if hdr:                                                                  # reflection probes: HDR panoramas at points spread over the place, each with the box it corrects against
+        for k, p in enumerate(probe_points(room, lo, hi, eye)):
+            px = panorama(p, os.path.join(work, f"probe{k}_raw.exr"), samples=32, width=512)
+            write_exr(os.path.join(work, f"probe{k}.exr"), (px * wb * gain), flip=False); probes.append({"at": list(p), "file": f"probe{k}.exr"})     # Blender's rows, bottom first: the file comes out upright
+        if sc.get("sky_hdr") and os.path.exists(os.path.join(d, "pbr", "env_view.npy")):
+            view = np.load(os.path.join(d, "pbr", "env_view.npy")).astype(np.float32) * wb * gain; write_exr(os.path.join(work, "sky.exr"), view, flip=True)    # row 0 the zenith
+        print(f"{len(probes)} reflection probes and the HDR sky in {time.time() - t:.0f} s", flush=True); t = time.time()
     # the painted sky round the place (blender_direct.py), at the same exposure, for the viewer to show behind the windows
     sky_k = None
     if sc.get("sky_picture") and os.path.exists(sc["sky_picture"]):
@@ -269,7 +319,7 @@ def main(d, size=4096, samples=64):
     # 4. the plain copy (one colour a thing) and the world's own file
     PV, PT, PC = [], [], []; n = 0
     for o in show:
-        V, T = arrays(o); PV.append(V); PT.append(T + n); n += len(V); PC.append(np.tile(np.array(plain_colour(o), np.float32), (len(T), 1)))
+        V, T = arrays(o, most=12000 if sc.get("pbr") else None); PV.append(V); PT.append(T + n); n += len(V); PC.append(np.tile(np.array(plain_colour(o), np.float32), (len(T), 1)))
     np.savez(os.path.join(work, "geo.npz"), CV=CV, CT=CT, PV=np.concatenate(PV), PT=np.concatenate(PT), PC=np.concatenate(PC))
     for o in show:
         if o.parent is not None: w = o.matrix_world.copy(); o.parent = None; o.matrix_world = w
@@ -282,7 +332,7 @@ def main(d, size=4096, samples=64):
         x = np.array(c[:3], np.float32) * k * gain; x = x * (1 + x / 16.0) / (1 + x)
         return [round(float(v), 3) for v in np.where(x <= 0.0031308, 12.92 * x, 1.055 * np.power(np.maximum(x, 1e-8), 1 / 2.4) - 0.055).clip(0, 1)]
     meta = {"room": room, "setting": "indoor" if room else "outdoor", "lo": list(lo), "hi": list(hi), "eye": eye, "forward": fwd, "gain": gain, "light_max": LM_MAX, "lightmaps": len(lms),
-            "backdrop": tone(sky, sky[3]) if sky else [0.02, 0.02, 0.03], "things": len(tops), "hour": hour, "sky_k": sky_k, "white_balance": [round(float(x), 3) for x in wb], "faces": int(sum(len(t) for t in PT)), "pieces": len(show), "size": size, "samples": samples}
+            "backdrop": tone(sky, sky[3]) if sky else [0.02, 0.02, 0.03], "things": len(tops), "hour": hour, "sky_k": sky_k, "white_balance": [round(float(x), 3) for x in wb], "hdr": hdr, "probes": probes, "room_box": list(sc["room_box"]) if sc.get("room_box") else None, "fog": list(sc["fog"]) if sc.get("fog") else None, "faces": int(sum(len(t) for t in PT)), "pieces": len(show), "size": size, "samples": samples}
     json.dump(meta, open(os.path.join(work, "meta.json"), "w"), indent=1)
     print(f"exposure gain {gain:.3g}, {len(tops)} things, {meta['faces']} faces in {len(show)} pieces; written in {time.time() - t:.0f} s ({time.time() - t0:.0f} s in all)", flush=True)
 

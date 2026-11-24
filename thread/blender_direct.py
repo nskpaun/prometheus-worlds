@@ -1,5 +1,5 @@
 """Art direction, between putting a place together in Blender and baking its light (pipeline.py runs it on both routes).
-Two things the RFC "visuals first" (docs/rfc-visuals-first.md, pillars 2 and 4) asks for, done with what is on this Mac:
+Two things the RFC "visuals first" (docs/pbr-method.md, pillars 2 and 4) asks for, done with what is on this Mac:
 
   1. A real sky. Until now a window showed one flat colour. Here the picture model (FLUX.2 Klein) paints the view out of
      this building at its hour as a wide panorama; it is laid round the scene as Blender's world, so the sky's own colours
@@ -20,7 +20,7 @@ BLENDER_SKY=0 leaves the sky as it was; BLENDER_DIRECT=0 skips the look (0, 1 or
 import sys, os, json, math, time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-HOURS = ("day", "dusk", "night")
+HOURS = ("day", "golden_hour", "dusk", "night")        # golden hour is exposed as day, and named as itself to the art director
 # how bright the sky is laid in at each hour (Blender's world strength for an average sky pixel of 1), and how high its sun stands
 SKY_STRENGTH = {"day": 1.6, "dusk": 0.4, "night": 0.04}
 SKY_SEEN = {"day": 0.15, "dusk": 0.3, "night": 1.0}     # the sky as the eye sees it through a window, against the light it casts: a photographer's window gel, so the view is not burnt white
@@ -42,12 +42,17 @@ def exposure(lum, hour, ev=0.0):
     return float(np.clip(g * 2.0 ** max(-3.0, min(3.0, ev)), 1e-3, 1e4))
 
 def white_balance(samples, keep=0.4):
-    """Per-channel factors that take (1 - keep) of the average colour cast of the light out, as a camera's white balance
-    does, without changing its brightness: a room lit by tungsten lamps stays warm but no longer all orange."""
+    """Per-channel factors of a camera white-balanced along the black-body line: its balance set (in mireds) 60 % of the
+    way from daylight to the colour temperature of the light's average, so tungsten light stays warm but is no longer
+    all orange, daylight stays neutral, and nothing is pushed toward green or magenta. Brightness is unchanged."""
     import numpy as np
     x = np.concatenate([np.asarray(a, np.float64).reshape(-1, 3) for a in samples if len(a)]) if any(len(a) for a in samples) else np.ones((1, 3))
     x = x[np.isfinite(x).all(1)]; m = x.mean(0) if len(x) else np.ones(3); m = np.maximum(m, 1e-6)
-    y = float(m @ [0.2126, 0.7152, 0.0722]); f = (y / m) ** (1 - keep); f /= float(f @ [0.2126, 0.7152, 0.0722]) or 1.0
+    def chrom(c): c = np.asarray(c, np.float64); return np.log(np.maximum(c[[0, 2]], 1e-6) / max(c[1], 1e-6))
+    ts = np.linspace(1200, 12000, 400); got = min(ts, key=lambda t: float(np.sum((chrom(_kelvin(t)) - chrom(m)) ** 2)))
+    mired = lambda t: 1e6 / t; cam = 1e6 / (mired(got) * (1 - keep) + mired(6600.0) * keep)          # the camera balanced most of the way to the light's own colour
+    f = 1.0 / np.maximum(np.array(_kelvin(cam)), 1e-6); lum = np.array([0.2126, 0.7152, 0.0722])
+    f = f / float(f @ lum) if float(f @ lum) > 0 else np.ones(3)
     return f.astype(np.float32)
 
 # ------------------------------------------------------------------------------------------------ inside Blender
@@ -100,6 +105,7 @@ def inventory():
              for o in sc.objects if o.type == "LIGHT" and o.data.type != "SUN"]
     sun = next((o for o in sc.objects if o.type == "LIGHT" and o.data.type == "SUN"), None)
     return {"room_m": room, "things": things, "lamps": lamps, "sun": round(sun.data.energy, 2) if sun else 0, "exposure_ev": float(sc.get("exposure_ev", 0.0)), "hour": sc.get("hour"),
+            "fog": float(sc["fog"][0]) if sc.get("fog") else 0.0,
             "sky_strength": float(sc["sky"][3]) if sc.get("sky") else None}
 
 def cycles(samples, w, h):
@@ -208,7 +214,7 @@ def _kelvin(t):
 
 def mend(d, path):
     """Apply the mends the model chose, each within bounds. -> what was done, one line each"""
-    bpy, _, Vector = _bl(); sc = bpy.context.scene; done = []; touched = set()
+    bpy, _, Vector = _bl(); sc = bpy.context.scene; done = []; touched = set(); adds = 0
     things = {o.name.lower(): (o, lo, hi) for o, lo, hi in tops()}
     for f in json.load(open(path)):
         op = f.get("op"); name = str(f.get("thing") or f.get("lamp") or "").strip(); t = things.get(name.lower())
@@ -238,10 +244,47 @@ def mend(d, path):
                     if k == 0: L.hide_render = True
                     if f.get("kelvin"): L.data.color = kelvin(f["kelvin"])
                 if ls: done.append(f"lamps {name!r} ({len(ls)}): watts x{k:.2f}" + (f", {int(f['kelvin'])} K" if f.get("kelvin") else ""))
+            elif op == "add" and adds < 4:
+                got = add_prop(str(f.get("thing") or ""), str(f.get("on") or "floor"), things)
+                if got: adds += 1; done.append(got)
+            elif op == "fog":
+                fg = list(sc["fog"]) if sc.get("fog") else [0.0, 4.0, 0.78, 0.82, 0.9]; fg[0] = max(0.0, min(0.03, float(f.get("density", 0)))); sc["fog"] = fg; done.append(f"fog {fg[0]:.3f}")
             elif op == "exposure":
                 ev = max(-2.0, min(2.0, float(f.get("ev", 0)))); sc["exposure_ev"] = float(max(-1.0, min(1.0, sc.get("exposure_ev", 0.0) + ev))); done.append(f"exposure {ev:+.1f} EV")
         except Exception as e: done.append(f"could not {op} {name}: {e}")
     print("\n".join("MEND " + x for x in done), flush=True)
+
+def add_prop(what, on, things):
+    """A small thing from the CC0 library set on top of a named thing (somewhere on its top, clear of its edge), or on the
+    floor beside it. -> what was done, or "" """
+    bpy, _, Vector = _bl(); sys.path.insert(0, os.path.join(HERE, "pbr")); import kitbash, random
+    m = kitbash.match(what, None, least=1.5)
+    if not m: return ""
+    before = set(bpy.data.objects.keys())
+    try: bpy.ops.import_scene.gltf(filepath=m["path"])
+    except Exception: return ""
+    new = [bpy.data.objects[k] for k in bpy.data.objects.keys() if k not in before]; meshes = [o for o in new if o.type == "MESH"]
+    if not meshes: return ""
+    bpy.context.view_layer.update()
+    for o in meshes: w = o.matrix_world.copy(); o.parent = None; o.matrix_world = w
+    for o in new:
+        if o.type != "MESH": bpy.data.objects.remove(o)
+    bpy.ops.object.select_all(action="DESELECT")
+    for o in meshes: o.select_set(True)
+    bpy.context.view_layer.objects.active = meshes[0]
+    if len(meshes) > 1: bpy.ops.object.join()
+    o = bpy.context.view_layer.objects.active; bpy.ops.object.transform_apply(location=True, rotation=True, scale=True)
+    pts = [Vector(v.co) for v in o.data.vertices]; lo = Vector([min(p[i] for p in pts) for i in range(3)]); hi = Vector([max(p[i] for p in pts) for i in range(3)])
+    o.data.transform(__import__("mathutils").Matrix.Translation(-Vector(((lo.x + hi.x) / 2, (lo.y + hi.y) / 2, lo.z)))); ext = hi - lo
+    t = things.get(on.lower()); rng = random.Random(len(bpy.data.objects))
+    if t and on.lower() != "floor":
+        _, tlo, thi = t; mx, my = max(0.0, (thi.x - tlo.x) / 2 - ext.x / 2 - 0.04), max(0.0, (thi.y - tlo.y) / 2 - ext.y / 2 - 0.04)
+        o.location = Vector(((tlo.x + thi.x) / 2 + rng.uniform(-mx, mx), (tlo.y + thi.y) / 2 + rng.uniform(-my, my), thi.z + 0.002))
+    elif t:
+        _, tlo, thi = t; o.location = Vector((thi.x + ext.x / 2 + 0.1, (tlo.y + thi.y) / 2, 0.0))
+    else: return ""
+    o.rotation_euler = (0, 0, rng.uniform(0, 6.28)); o.name = f"added {m['name']}"; o["thing"] = True
+    return f"added {m['name']} on {on}"
 
 def blender_main(a):
     import bpy
@@ -279,6 +322,8 @@ Mends you may give (use names exactly as in the inventory; for lamps a name or t
   {{"op": "scale", "thing": NAME, "by": NUMBER}}
   {{"op": "lamp", "lamp": NAME, "watts_times": NUMBER, "kelvin": NUMBER or null}}
   {{"op": "exposure", "ev": NUMBER}}
+  {{"op": "add", "thing": "a small thing a prop library has (books, mug, vase, candle, potted plant, bowl, lamp, picture frame, bottle)", "on": NAME of the thing it goes on, or "floor"}}   (at most 4: for a bare table top, an empty shelf or a sterile corner)
+  {{"op": "fog", "density": 0 to 0.03}}   (haze in the air: a little gives depth to a big or smoky place; 0 for none)
 Answer with JSON only: {{"score": 1 to 10 (how good it looks now), "faults": ["short sentence", ...], "mends": [at most 8 mends]}}
 If it already looks right, give no mends."""
 
@@ -303,6 +348,7 @@ def sheet(look_dir, hour, ev):
         im = Image.fromarray(tone(x, g)); dr = ImageDraw.Draw(im); dr.rectangle((0, 0, 9 * len(v) + 14, 22), fill=(0, 0, 0)); dr.text((6, 5), v, fill=(255, 255, 255)); tiles.append(im)
     w, h = tiles[0].size; cols = 2; rows = (len(tiles) + 1) // 2; s = Image.new("RGB", (w * cols, h * rows), (20, 20, 20))
     for i, t in enumerate(tiles): s.paste(t, ((i % cols) * w, (i // cols) * h))
+    if s.width > 1024: s = s.resize((1024, round(s.height * 1024 / s.width)), Image.LANCZOS)      # the model's time grows with the picture's size; 1024 wide shows enough
     out = os.path.join(look_dir, "sheet.jpg"); s.save(out, quality=88); return out, inv
 
 def hour_of(d):
@@ -348,7 +394,7 @@ def main(d, said=""):
     try: st = json.load(open(os.path.join(d, "materials", "style.json"))); sentence = sentence or st.get("request", "").split("\n\nThe same place")[0]; light = st.get("light", {}).get("words", "")
     except (OSError, ValueError): st = {}; light = ""
     def blender(*args):
-        r = subprocess.run(BW.local_only([app, "-b", blend, "--python", os.path.abspath(__file__), "--"] + [str(x) for x in args]), capture_output=True, text=True)
+        r = subprocess.run(BW.local_only([app, "-b", blend, "--python-exit-code", "1", "--python", os.path.abspath(__file__), "--"] + [str(x) for x in args]), capture_output=True, text=True)
         if r.returncode: raise SystemExit("Blender stopped during art direction: " + (r.stdout + r.stderr)[-600:])
         return r.stdout
     os.makedirs(os.path.join(work, "direct"), exist_ok=True); inv_p = os.path.join(work, "direct", "start.json")
@@ -364,12 +410,12 @@ def main(d, said=""):
     # 2. look and mend
     rounds = int(os.environ.get("BLENDER_DIRECT", "2")); log = []
     if rounds > 0:
-        with chat.Chat(vision=True) as model:
+        with chat.Chat(vision=True, director=os.environ.get("BLENDER_DIRECTOR", "1") != "0") as model:
             for r in range(1, rounds + 1):
                 ld = os.path.join(work, "direct", f"r{r}"); blender("look", d, ld)
                 inv = json.load(open(os.path.join(ld, "inventory.json"))); pic, _ = sheet(ld, hour, inv.get("exposure_ev", 0.0))
-                text = CRITIC.format(sentence=sentence, hour=hour, light=light or "as the description says", n=len(inv["views"]),
-                                     inventory=json.dumps({k: inv[k] for k in ("room_m", "things", "lamps", "sun", "exposure_ev")}, separators=(",", ":")))
+                text = CRITIC.format(sentence=sentence, hour=hour.replace("_", " ") + (" (late afternoon, low warm sun)" if hour == "golden_hour" else ""), light=light or "as the description says", n=len(inv["views"]),
+                                     inventory=json.dumps({k: inv.get(k) for k in ("room_m", "things", "lamps", "sun", "exposure_ev", "fog")}, separators=(",", ":")))
                 j = None
                 for tries, extra in enumerate(("", "\n\nAnswer with the JSON object only, nothing before or after it.")):
                     a = model.say([{"role": "user", "content": [{"type": "image", "path": pic}, {"type": "text", "text": text + extra}]}], max_tokens=1400, temperature=0.0)

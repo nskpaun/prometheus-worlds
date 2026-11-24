@@ -11,14 +11,16 @@ import sys, os, json, subprocess, time
 import where
 
 MODEL, REVISION = "mlx-community/Qwen3.5-35B-A3B-4bit", "1e20fd8d42056f870933bf98ca6211024744f7ec"
+# the art director's eyes (RFC pillar 4): Qwen3-VL 32B, a model trained for looking at pictures, when asked for by name
+DIRECTOR, DIRECTOR_REVISION = "mlx-community/Qwen3-VL-32B-Instruct-4bit", "6e5644d3ea4b953b5221ffd02339bf897041038a"
 
 class Chat:
     """One model process held for a conversation: `with Chat() as c: c.say(messages)`."""
-    def __init__(self, vision=False):
+    def __init__(self, vision=False, director=False):
         """vision: the same weights loaded with their picture tower (mlx-vlm), so a message's content may be a list of
         {"type": "text", "text"} and {"type": "image", "path"} parts. Text answers are the same; `keep` is not used."""
         t = time.time()
-        self.p = subprocess.Popen([where.PY_IMG, "-B", os.path.abspath(__file__)], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True, env={**os.environ, "CHAT_VISION": "1" if vision else "0"})
+        self.p = subprocess.Popen([where.PY_IMG, "-B", os.path.abspath(__file__)], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True, env={**os.environ, "CHAT_VISION": "1" if vision or director else "0", "CHAT_DIRECTOR": "1" if director else "0"})
         line = self.p.stdout.readline()
         if not line: raise SystemExit("The world-plan model could not be started. Open the app again to finish setup, or run ./setup.sh.")
         self.load_s = json.loads(line)["load_s"]
@@ -69,7 +71,8 @@ def serve_vision():
     import mlx.core as mx
     from mlx_vlm import load, generate
     t = time.time()
-    try: model, proc = load(MODEL, revision=REVISION)
+    name, rev = (DIRECTOR, DIRECTOR_REVISION) if os.environ.get("CHAT_DIRECTOR") == "1" else (MODEL, REVISION)
+    try: model, proc = load(name, revision=rev)
     except Exception as e: sys.exit(f"The world-plan model could not be loaded with its picture tower ({type(e).__name__}: {str(e)[:200]}). Open the app again to finish setup, or run ./setup.sh.")
     print(json.dumps({"load_s": round(time.time() - t, 1)}), flush=True)
     for line in sys.stdin:
